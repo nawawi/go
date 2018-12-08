@@ -13,9 +13,16 @@ import (
 )
 
 func RemoveAll(path string) error {
-	// Not allowed in unix
-	if path == "" || endsWithDot(path) {
-		return syscall.EINVAL
+	if path == "" {
+		// fail silently to retain compatibility with previous behavior
+		// of RemoveAll. See issue 28830.
+		return nil
+	}
+
+	// The rmdir system call does not permit removing ".",
+	// so we don't permit it either.
+	if endsWithDot(path) {
+		return &PathError{"RemoveAll", path, syscall.EINVAL}
 	}
 
 	// RemoveAll recurses by deleting the path base from
@@ -122,18 +129,4 @@ func openFdAt(fd int, path string) (*File, error) {
 	}
 
 	return NewFile(uintptr(fd), path), nil
-}
-
-func endsWithDot(path string) bool {
-	if path == "." || path == ".." {
-		return true
-	}
-	if len(path) >= 2 && path[len(path)-2:] == "/." {
-		return true
-	}
-	if len(path) >= 3 && path[len(path)-3:] == "/.." {
-		return true
-	}
-
-	return false
 }

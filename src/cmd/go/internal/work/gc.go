@@ -174,7 +174,7 @@ CheckFlags:
 	}
 
 	// TODO: Test and delete these conditions.
-	if objabi.Fieldtrack_enabled != 0 || objabi.Preemptibleloops_enabled != 0 || objabi.Clobberdead_enabled != 0 {
+	if objabi.Fieldtrack_enabled != 0 || objabi.Preemptibleloops_enabled != 0 {
 		canDashC = false
 	}
 
@@ -265,7 +265,7 @@ func (gcToolchain) asm(b *Builder, a *Action, sfiles []string) ([]string, error)
 func (gcToolchain) symabis(b *Builder, a *Action, sfiles []string) (string, error) {
 	mkSymabis := func(p *load.Package, sfiles []string, path string) error {
 		args := asmArgs(a, p)
-		args = append(args, "-symabis", "-o", path)
+		args = append(args, "-gensymabis", "-o", path)
 		for _, sfile := range sfiles {
 			if p.ImportPath == "runtime/cgo" && strings.HasPrefix(sfile, "gcc_") {
 				continue
@@ -274,7 +274,7 @@ func (gcToolchain) symabis(b *Builder, a *Action, sfiles []string) (string, erro
 		}
 
 		// Supply an empty go_asm.h as if the compiler had been run.
-		// -symabis parsing is lax enough that we don't need the
+		// -gensymabis parsing is lax enough that we don't need the
 		// actual definitions that would appear in go_asm.h.
 		if err := b.writeFile(a.Objdir+"go_asm.h", nil); err != nil {
 			return err
@@ -295,9 +295,9 @@ func (gcToolchain) symabis(b *Builder, a *Action, sfiles []string) (string, erro
 	// Gather known cross-package references from assembly code.
 	var otherPkgs []string
 	if p.ImportPath == "runtime" {
-		// Assembly in syscall and runtime/cgo references
+		// Assembly in the following packages references
 		// symbols in runtime.
-		otherPkgs = []string{"syscall", "runtime/cgo"}
+		otherPkgs = []string{"syscall", "internal/syscall/unix", "runtime/cgo"}
 	} else if p.ImportPath == "runtime/internal/atomic" {
 		// sync/atomic is an assembly wrapper around
 		// runtime/internal/atomic.

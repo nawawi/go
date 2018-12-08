@@ -3,16 +3,21 @@ package analysisflags
 import (
 	"flag"
 	"fmt"
+<<<<<<< HEAD
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+=======
+	"log"
+>>>>>>> upstream/master
 	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
 )
 
+<<<<<<< HEAD
 const usage = `PROGNAME is a tool for static analysis of Go programs.
 
 PROGNAME examines Go source code and reports suspicious constructs, such as Printf
@@ -30,12 +35,27 @@ func PrintUsage(out io.Writer) {
 }
 
 // Help implements the help subcommand for a multichecker or vet-lite
+=======
+const help = `PROGNAME is a tool for static analysis of Go programs.
+
+PROGNAME examines Go source code and reports suspicious constructs,
+such as Printf calls whose arguments do not align with the format
+string. It uses heuristics that do not guarantee all reports are
+genuine problems, but it can find errors not caught by the compilers.
+`
+
+// Help implements the help subcommand for a multichecker or unitchecker
+>>>>>>> upstream/master
 // style command. The optional args specify the analyzers to describe.
 // Help calls log.Fatal if no such analyzer exists.
 func Help(progname string, analyzers []*analysis.Analyzer, args []string) {
 	// No args: show summary of all analyzers.
 	if len(args) == 0 {
+<<<<<<< HEAD
 		PrintUsage(os.Stdout)
+=======
+		fmt.Println(strings.Replace(help, "PROGNAME", progname, -1))
+>>>>>>> upstream/master
 		fmt.Println("Registered analyzers:")
 		fmt.Println()
 		sort.Slice(analyzers, func(i, j int) bool {

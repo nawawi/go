@@ -281,8 +281,8 @@ func runGet(cmd *base.Command, args []string) {
 				base.Errorf("go get %s: %v", arg, err)
 				continue
 			}
-			if !str.HasFilePathPrefix(abs, modload.ModRoot) {
-				base.Errorf("go get %s: directory %s is outside module root %s", arg, abs, modload.ModRoot)
+			if !str.HasFilePathPrefix(abs, modload.ModRoot()) {
+				base.Errorf("go get %s: directory %s is outside module root %s", arg, abs, modload.ModRoot())
 				continue
 			}
 			// TODO: Check if abs is inside a nested module.
@@ -534,9 +534,11 @@ func runGet(cmd *base.Command, args []string) {
 					// module root.
 					continue
 				}
+				base.Errorf("%s", p.Error)
 			}
 			todo = append(todo, p)
 		}
+		base.ExitIfErrors()
 
 		// If -d was specified, we're done after the download: no build.
 		// (The load.PackagesAndErrors is what did the download

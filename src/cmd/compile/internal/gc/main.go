@@ -438,9 +438,16 @@ func Main(archInit func(*Arch)) {
 	}
 
 	ssaDump = os.Getenv("GOSSAFUNC")
-	if strings.HasSuffix(ssaDump, "+") {
-		ssaDump = ssaDump[:len(ssaDump)-1]
-		ssaDumpStdout = true
+	if ssaDump != "" {
+		if strings.HasSuffix(ssaDump, "+") {
+			ssaDump = ssaDump[:len(ssaDump)-1]
+			ssaDumpStdout = true
+		}
+		spl := strings.Split(ssaDump, ":")
+		if len(spl) > 1 {
+			ssaDump = spl[0]
+			ssaDumpCFG = spl[1]
+		}
 	}
 
 	trackScopes = flagDWARF
@@ -509,7 +516,7 @@ func Main(archInit func(*Arch)) {
 	for i := 0; i < len(xtop); i++ {
 		n := xtop[i]
 		if op := n.Op; op != ODCL && op != OAS && op != OAS2 && (op != ODCLTYPE || !n.Left.Name.Param.Alias) {
-			xtop[i] = typecheck(n, Etop)
+			xtop[i] = typecheck(n, ctxStmt)
 		}
 	}
 
@@ -521,7 +528,7 @@ func Main(archInit func(*Arch)) {
 	for i := 0; i < len(xtop); i++ {
 		n := xtop[i]
 		if op := n.Op; op == ODCL || op == OAS || op == OAS2 || op == ODCLTYPE && n.Left.Name.Param.Alias {
-			xtop[i] = typecheck(n, Etop)
+			xtop[i] = typecheck(n, ctxStmt)
 		}
 	}
 	resumecheckwidth()
@@ -536,7 +543,7 @@ func Main(archInit func(*Arch)) {
 			Curfn = n
 			decldepth = 1
 			saveerrors()
-			typecheckslice(Curfn.Nbody.Slice(), Etop)
+			typecheckslice(Curfn.Nbody.Slice(), ctxStmt)
 			checkreturn(Curfn)
 			if nerrors != 0 {
 				Curfn.Nbody.Set(nil) // type errors; do not compile
@@ -693,7 +700,7 @@ func Main(archInit func(*Arch)) {
 	timings.Start("be", "externaldcls")
 	for i, n := range externdcl {
 		if n.Op == ONAME {
-			externdcl[i] = typecheck(externdcl[i], Erv)
+			externdcl[i] = typecheck(externdcl[i], ctxExpr)
 		}
 	}
 	// Check the map keys again, since we typechecked the external
@@ -1338,8 +1345,8 @@ func concurrentBackendAllowed() bool {
 	if Debug_vlog || debugstr != "" || debuglive > 0 {
 		return false
 	}
-	// TODO: Test and delete these conditions.
-	if objabi.Fieldtrack_enabled != 0 || objabi.Clobberdead_enabled != 0 {
+	// TODO: Test and delete this condition.
+	if objabi.Fieldtrack_enabled != 0 {
 		return false
 	}
 	// TODO: fix races and enable the following flags
