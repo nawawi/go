@@ -156,7 +156,7 @@ func racecallback(cmd uintptr, ctx unsafe.Pointer) {
 }
 
 func raceSymbolizeCode(ctx *symbolizeCodeContext) {
-	f := FuncForPC(ctx.pc)
+	f := findfunc(ctx.pc)._Func()
 	if f != nil {
 		file, line := f.FileLine(ctx.pc)
 		if line != 0 {
@@ -291,20 +291,20 @@ var racedataend uintptr
 var racearenastart uintptr
 var racearenaend uintptr
 
-func racefuncenter(uintptr)
-func racefuncenterfp()
+func racefuncenter(callpc uintptr)
+func racefuncenterfp(fp uintptr)
 func racefuncexit()
-func raceread(uintptr)
-func racewrite(uintptr)
+func raceread(addr uintptr)
+func racewrite(addr uintptr)
 func racereadrange(addr, size uintptr)
 func racewriterange(addr, size uintptr)
-func racereadrangepc1(uintptr, uintptr, uintptr)
-func racewriterangepc1(uintptr, uintptr, uintptr)
+func racereadrangepc1(addr, size, pc uintptr)
+func racewriterangepc1(addr, size, pc uintptr)
 func racecallbackthunk(uintptr)
 
 // racecall allows calling an arbitrary function f from C race runtime
 // with up to 4 uintptr arguments.
-func racecall(*byte, uintptr, uintptr, uintptr, uintptr)
+func racecall(fn *byte, arg0, arg1, arg2, arg3 uintptr)
 
 // checks if the address has shadow (i.e. heap or data/bss)
 //go:nosplit

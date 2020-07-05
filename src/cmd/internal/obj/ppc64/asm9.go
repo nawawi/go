@@ -389,9 +389,10 @@ var optab = []Optab{
 	{AMOVWZ, C_REG, C_NONE, C_NONE, C_MSR, 54, 4, 0}, /* mtmsr */
 
 	/* Other ISA 2.05+ instructions */
-	{APOPCNTD, C_REG, C_NONE, C_NONE, C_REG, 93, 4, 0},  /* population count, x-form */
-	{ACMPB, C_REG, C_REG, C_NONE, C_REG, 92, 4, 0},      /* compare byte, x-form */
-	{ACMPEQB, C_REG, C_REG, C_NONE, C_CREG, 92, 4, 0},   /* compare equal byte, x-form */
+	{APOPCNTD, C_REG, C_NONE, C_NONE, C_REG, 93, 4, 0}, /* population count, x-form */
+	{ACMPB, C_REG, C_REG, C_NONE, C_REG, 92, 4, 0},     /* compare byte, x-form */
+	{ACMPEQB, C_REG, C_REG, C_NONE, C_CREG, 92, 4, 0},  /* compare equal byte, x-form, ISA 3.0 */
+	{ACMPEQB, C_REG, C_NONE, C_NONE, C_REG, 70, 4, 0},
 	{AFTDIV, C_FREG, C_FREG, C_NONE, C_SCON, 92, 4, 0},  /* floating test for sw divide, x-form */
 	{AFTSQRT, C_FREG, C_NONE, C_NONE, C_SCON, 93, 4, 0}, /* floating test for sw square root, x-form */
 	{ACOPY, C_REG, C_NONE, C_NONE, C_REG, 92, 4, 0},     /* copy/paste facility, x-form */
@@ -1304,9 +1305,13 @@ func buildop(ctxt *obj.Link) {
 			opset(ADIVDUVCC, r0)
 			opset(ADIVDUCC, r0)
 
-		case APOPCNTD:
+		case APOPCNTD: /* popcntd, popcntw, popcntb, cnttzw, cnttzd */
 			opset(APOPCNTW, r0)
 			opset(APOPCNTB, r0)
+			opset(ACNTTZW, r0)
+			opset(ACNTTZWCC, r0)
+			opset(ACNTTZD, r0)
+			opset(ACNTTZDCC, r0)
 
 		case ACOPY: /* copy, paste. */
 			opset(APASTECC, r0)
@@ -2212,7 +2217,7 @@ func (c *ctxt9) opform(insn uint32) int {
 // instruction op with source or destination (as appropriate) register reg.
 func (c *ctxt9) symbolAccess(s *obj.LSym, d int64, reg int16, op uint32) (o1, o2 uint32) {
 	if c.ctxt.Headtype == objabi.Haix {
-		// Every symbol accesses must be made via a TOC anchor.
+		// Every symbol access must be made via a TOC anchor.
 		c.ctxt.Diag("symbolAccess called for %s", s.Name)
 	}
 	var base uint32
@@ -3555,22 +3560,22 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 		if REG_V0 <= xt && xt <= REG_V31 {
 			/* Convert V0-V31 to VS32-VS63 */
 			xt = xt + 64
-			o1 = AOP_XX1(c.oprrr(p.As), uint32(p.To.Reg), uint32(p.From.Reg), uint32(p.Reg))
+			o1 = AOP_XX1(c.oprrr(p.As), uint32(xt), uint32(p.From.Reg), uint32(p.Reg))
 		} else if REG_F0 <= xt && xt <= REG_F31 {
 			/* Convert F0-F31 to VS0-VS31 */
 			xt = xt + 64
-			o1 = AOP_XX1(c.oprrr(p.As), uint32(p.To.Reg), uint32(p.From.Reg), uint32(p.Reg))
+			o1 = AOP_XX1(c.oprrr(p.As), uint32(xt), uint32(p.From.Reg), uint32(p.Reg))
 		} else if REG_VS0 <= xt && xt <= REG_VS63 {
-			o1 = AOP_XX1(c.oprrr(p.As), uint32(p.To.Reg), uint32(p.From.Reg), uint32(p.Reg))
+			o1 = AOP_XX1(c.oprrr(p.As), uint32(xt), uint32(p.From.Reg), uint32(p.Reg))
 		} else if REG_V0 <= xs && xs <= REG_V31 {
 			/* Likewise for XS */
 			xs = xs + 64
-			o1 = AOP_XX1(c.oprrr(p.As), uint32(p.From.Reg), uint32(p.To.Reg), uint32(p.Reg))
+			o1 = AOP_XX1(c.oprrr(p.As), uint32(xs), uint32(p.To.Reg), uint32(p.Reg))
 		} else if REG_F0 <= xs && xs <= REG_F31 {
 			xs = xs + 64
-			o1 = AOP_XX1(c.oprrr(p.As), uint32(p.From.Reg), uint32(p.To.Reg), uint32(p.Reg))
+			o1 = AOP_XX1(c.oprrr(p.As), uint32(xs), uint32(p.To.Reg), uint32(p.Reg))
 		} else if REG_VS0 <= xs && xs <= REG_VS63 {
-			o1 = AOP_XX1(c.oprrr(p.As), uint32(p.From.Reg), uint32(p.To.Reg), uint32(p.Reg))
+			o1 = AOP_XX1(c.oprrr(p.As), uint32(xs), uint32(p.To.Reg), uint32(p.Reg))
 		}
 
 	case 89: /* VSX instructions, XX2-form */
@@ -3656,18 +3661,20 @@ func (c *ctxt9) asmout(p *obj.Prog, o *Optab, out []uint32) {
 		cy := int(c.regoff(p.GetFrom3()))
 		o1 = AOP_Z23I(c.oprrr(p.As), uint32(p.To.Reg), uint32(p.From.Reg), uint32(p.Reg), uint32(cy))
 
-	case 95: /* Retrieve TOC symbol */
-		v := c.vregoff(&p.To)
+	case 95: /* Retrieve TOC relative symbol */
+		/* This code is for AIX only */
+		v := c.vregoff(&p.From)
 		if v != 0 {
 			c.ctxt.Diag("invalid offset against TOC slot %v", p)
 		}
 
-		if c.opform(c.opload(p.As)) != DS_FORM {
+		inst := c.opload(p.As)
+		if c.opform(inst) != DS_FORM {
 			c.ctxt.Diag("invalid form for a TOC access in %v", p)
 		}
 
 		o1 = AOP_IRR(OP_ADDIS, uint32(p.To.Reg), REG_R2, 0)
-		o2 = AOP_IRR(c.opload(AMOVD), uint32(p.To.Reg), uint32(p.To.Reg), 0)
+		o2 = AOP_IRR(inst, uint32(p.To.Reg), uint32(p.To.Reg), 0)
 		rel := obj.Addrel(c.cursym)
 		rel.Off = int32(c.pc)
 		rel.Siz = 8
@@ -3758,6 +3765,8 @@ func (c *ctxt9) oprrr(a obj.As) uint32 {
 		return OPVCC(31, 32, 0, 0)
 	case ACMPB:
 		return OPVCC(31, 508, 0, 0) /* cmpb - v2.05 */
+	case ACMPEQB:
+		return OPVCC(31, 224, 0, 0) /* cmpeqb - v3.00 */
 
 	case ACNTLZW:
 		return OPVCC(31, 26, 0, 0)
@@ -4116,6 +4125,14 @@ func (c *ctxt9) oprrr(a obj.As) uint32 {
 		return OPVCC(31, 378, 0, 0) /* popcntw - v2.06 */
 	case APOPCNTB:
 		return OPVCC(31, 122, 0, 0) /* popcntb - v2.02 */
+	case ACNTTZW:
+		return OPVCC(31, 538, 0, 0) /* cnttzw - v3.00 */
+	case ACNTTZWCC:
+		return OPVCC(31, 538, 0, 1) /* cnttzw. - v3.00 */
+	case ACNTTZD:
+		return OPVCC(31, 570, 0, 0) /* cnttzd - v3.00 */
+	case ACNTTZDCC:
+		return OPVCC(31, 570, 0, 1) /* cnttzd. - v3.00 */
 
 	case ARFI:
 		return OPVCC(19, 50, 0, 0)

@@ -9,6 +9,7 @@ package httputil
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -159,13 +161,17 @@ func TestReverseProxyStripHeadersPresentInConnection(t *testing.T) {
 	const someConnHeader = "X-Some-Conn-Header"
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if c := r.Header.Get("Connection"); c != "" {
+			t.Errorf("handler got header %q = %q; want empty", "Connection", c)
+		}
 		if c := r.Header.Get(fakeConnectionToken); c != "" {
 			t.Errorf("handler got header %q = %q; want empty", fakeConnectionToken, c)
 		}
 		if c := r.Header.Get(someConnHeader); c != "" {
 			t.Errorf("handler got header %q = %q; want empty", someConnHeader, c)
 		}
-		w.Header().Set("Connection", someConnHeader+", "+fakeConnectionToken)
+		w.Header().Add("Connection", "Upgrade, "+fakeConnectionToken)
+		w.Header().Add("Connection", someConnHeader)
 		w.Header().Set(someConnHeader, "should be deleted")
 		w.Header().Set(fakeConnectionToken, "should be deleted")
 		io.WriteString(w, backendResponse)
@@ -178,15 +184,34 @@ func TestReverseProxyStripHeadersPresentInConnection(t *testing.T) {
 	proxyHandler := NewSingleHostReverseProxy(backendURL)
 	frontend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxyHandler.ServeHTTP(w, r)
-		if c := r.Header.Get(someConnHeader); c != "original value" {
-			t.Errorf("handler modified header %q = %q; want %q", someConnHeader, c, "original value")
+		if c := r.Header.Get(someConnHeader); c != "should be deleted" {
+			t.Errorf("handler modified header %q = %q; want %q", someConnHeader, c, "should be deleted")
+		}
+		if c := r.Header.Get(fakeConnectionToken); c != "should be deleted" {
+			t.Errorf("handler modified header %q = %q; want %q", fakeConnectionToken, c, "should be deleted")
+		}
+		c := r.Header["Connection"]
+		var cf []string
+		for _, f := range c {
+			for _, sf := range strings.Split(f, ",") {
+				if sf = strings.TrimSpace(sf); sf != "" {
+					cf = append(cf, sf)
+				}
+			}
+		}
+		sort.Strings(cf)
+		expectedValues := []string{"Upgrade", someConnHeader, fakeConnectionToken}
+		sort.Strings(expectedValues)
+		if !reflect.DeepEqual(cf, expectedValues) {
+			t.Errorf("handler modified header %q = %q; want %q", "Connection", cf, expectedValues)
 		}
 	}))
 	defer frontend.Close()
 
 	getReq, _ := http.NewRequest("GET", frontend.URL, nil)
-	getReq.Header.Set("Connection", someConnHeader+", "+fakeConnectionToken)
-	getReq.Header.Set(someConnHeader, "original value")
+	getReq.Header.Add("Connection", "Upgrade, "+fakeConnectionToken)
+	getReq.Header.Add("Connection", someConnHeader)
+	getReq.Header.Set(someConnHeader, "should be deleted")
 	getReq.Header.Set(fakeConnectionToken, "should be deleted")
 	res, err := frontend.Client().Do(getReq)
 	if err != nil {
@@ -199,6 +224,9 @@ func TestReverseProxyStripHeadersPresentInConnection(t *testing.T) {
 	}
 	if got, want := string(bodyBytes), backendResponse; got != want {
 		t.Errorf("got body %q; want %q", got, want)
+	}
+	if c := res.Header.Get("Connection"); c != "" {
+		t.Errorf("handler got header %q = %q; want empty", "Connection", c)
 	}
 	if c := res.Header.Get(someConnHeader); c != "" {
 		t.Errorf("handler got header %q = %q; want empty", someConnHeader, c)
@@ -314,6 +342,47 @@ func TestReverseProxyFlushInterval(t *testing.T) {
 	defer res.Body.Close()
 	if bodyBytes, _ := ioutil.ReadAll(res.Body); string(bodyBytes) != expected {
 		t.Errorf("got body %q; expected %q", bodyBytes, expected)
+	}
+}
+
+func TestReverseProxyFlushIntervalHeaders(t *testing.T) {
+	const expected = "hi"
+	stopCh := make(chan struct{})
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("MyHeader", expected)
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		<-stopCh
+	}))
+	defer backend.Close()
+	defer close(stopCh)
+
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	proxyHandler := NewSingleHostReverseProxy(backendURL)
+	proxyHandler.FlushInterval = time.Microsecond
+
+	frontend := httptest.NewServer(proxyHandler)
+	defer frontend.Close()
+
+	req, _ := http.NewRequest("GET", frontend.URL, nil)
+	req.Close = true
+
+	ctx, cancel := context.WithTimeout(req.Context(), 10*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+
+	res, err := frontend.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	defer res.Body.Close()
+
+	if res.Header.Get("MyHeader") != expected {
+		t.Errorf("got header %q; expected %q", res.Header.Get("MyHeader"), expected)
 	}
 }
 
@@ -588,6 +657,26 @@ func TestReverseProxy_NilBody(t *testing.T) {
 	if res.StatusCode != 502 {
 		t.Errorf("status code = %v; want 502 (Gateway Error)", res.Status)
 	}
+}
+
+// Issue 33142: always allocate the request headers
+func TestReverseProxy_AllocatedHeader(t *testing.T) {
+	proxyHandler := new(ReverseProxy)
+	proxyHandler.ErrorLog = log.New(ioutil.Discard, "", 0) // quiet for tests
+	proxyHandler.Director = func(*http.Request) {}         // noop
+	proxyHandler.Transport = RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Header == nil {
+			t.Error("Header == nil; want a non-nil Header")
+		}
+		return nil, errors.New("done testing the interesting part; so force a 502 Gateway error")
+	})
+
+	proxyHandler.ServeHTTP(httptest.NewRecorder(), &http.Request{
+		Method:     "GET",
+		URL:        &url.URL{Scheme: "http", Host: "fake.tld", Path: "/"},
+		Proto:      "HTTP/1.0",
+		ProtoMajor: 1,
+	})
 }
 
 // Issue 14237. Test ModifyResponse and that an error from it
@@ -1012,8 +1101,17 @@ func TestReverseProxyWebSocket(t *testing.T) {
 	backURL, _ := url.Parse(backendServer.URL)
 	rproxy := NewSingleHostReverseProxy(backURL)
 	rproxy.ErrorLog = log.New(ioutil.Discard, "", 0) // quiet for tests
+	rproxy.ModifyResponse = func(res *http.Response) error {
+		res.Header.Add("X-Modified", "true")
+		return nil
+	}
 
-	frontendProxy := httptest.NewServer(rproxy)
+	handler := http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.Header().Set("X-Header", "X-Value")
+		rproxy.ServeHTTP(rw, req)
+	})
+
+	frontendProxy := httptest.NewServer(handler)
 	defer frontendProxy.Close()
 
 	req, _ := http.NewRequest("GET", frontendProxy.URL, nil)
@@ -1028,6 +1126,13 @@ func TestReverseProxyWebSocket(t *testing.T) {
 	if res.StatusCode != 101 {
 		t.Fatalf("status = %v; want 101", res.Status)
 	}
+
+	got := res.Header.Get("X-Header")
+	want := "X-Value"
+	if got != want {
+		t.Errorf("Header(XHeader) = %q; want %q", got, want)
+	}
+
 	if upgradeType(res.Header) != "websocket" {
 		t.Fatalf("not websocket upgrade; got %#v", res.Header)
 	}
@@ -1037,13 +1142,17 @@ func TestReverseProxyWebSocket(t *testing.T) {
 	}
 	defer rwc.Close()
 
+	if got, want := res.Header.Get("X-Modified"), "true"; got != want {
+		t.Errorf("response X-Modified header = %q; want %q", got, want)
+	}
+
 	io.WriteString(rwc, "Hello\n")
 	bs := bufio.NewScanner(rwc)
 	if !bs.Scan() {
 		t.Fatalf("Scan: %v", bs.Err())
 	}
-	got := bs.Text()
-	want := `backend got "Hello"`
+	got = bs.Text()
+	want = `backend got "Hello"`
 	if got != want {
 		t.Errorf("got %#q, want %#q", got, want)
 	}

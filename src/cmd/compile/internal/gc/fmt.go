@@ -174,6 +174,7 @@ var goopnames = []string{
 	OGT:       ">",
 	OIF:       "if",
 	OIMAG:     "imag",
+	OINLMARK:  "inlmark",
 	ODEREF:    "*",
 	OLEN:      "len",
 	OLE:       "<=",
@@ -751,7 +752,11 @@ func typefmt(t *types.Type, flag FmtFlag, mode fmtMode, depth int) string {
 			case types.IsExported(f.Sym.Name):
 				buf = append(buf, sconv(f.Sym, FmtShort, mode)...)
 			default:
-				buf = append(buf, sconv(f.Sym, FmtUnsigned, mode)...)
+				flag1 := FmtLeft
+				if flag&FmtUnsigned != 0 {
+					flag1 = FmtUnsigned
+				}
+				buf = append(buf, sconv(f.Sym, flag1, mode)...)
 			}
 			buf = append(buf, tconv(f.Type, FmtShort, mode, depth)...)
 		}
@@ -941,6 +946,9 @@ func (n *Node) stmtfmt(s fmt.State, mode fmtMode) {
 
 	case ORETJMP:
 		mode.Fprintf(s, "retjmp %v", n.Sym)
+
+	case OINLMARK:
+		mode.Fprintf(s, "inlmark %d", n.Xoffset)
 
 	case OGO:
 		mode.Fprintf(s, "go %v", n.Left)
@@ -1400,14 +1408,11 @@ func (n *Node) exprfmt(s fmt.State, prec int, mode fmtMode) {
 		}
 		mode.Fprintf(s, "sliceheader{%v,%v,%v}", n.Left, n.List.First(), n.List.Second())
 
-	case OCOPY:
-		mode.Fprintf(s, "%#v(%v, %v)", n.Op, n.Left, n.Right)
-
-	case OCOMPLEX:
-		if n.List.Len() == 1 {
-			mode.Fprintf(s, "%#v(%v)", n.Op, n.List.First())
-		} else {
+	case OCOMPLEX, OCOPY:
+		if n.Left != nil {
 			mode.Fprintf(s, "%#v(%v, %v)", n.Op, n.Left, n.Right)
+		} else {
+			mode.Fprintf(s, "%#v(%.v)", n.Op, n.List)
 		}
 
 	case OCONV,
@@ -1536,6 +1541,8 @@ func (n *Node) nodefmt(s fmt.State, flag FmtFlag, mode fmtMode) {
 	if flag&FmtLong != 0 && t != nil {
 		if t.Etype == TNIL {
 			fmt.Fprint(s, "nil")
+		} else if n.Op == ONAME && n.Name.AutoTemp() {
+			mode.Fprintf(s, "%v value", t)
 		} else {
 			mode.Fprintf(s, "%v (type %v)", n, t)
 		}
@@ -1571,9 +1578,6 @@ func (n *Node) nodedump(s fmt.State, flag FmtFlag, mode fmtMode) {
 	switch n.Op {
 	default:
 		mode.Fprintf(s, "%v%j", n.Op, n)
-
-	case OINDREGSP:
-		mode.Fprintf(s, "%v-SP%j", n.Op, n)
 
 	case OLITERAL:
 		mode.Fprintf(s, "%v-%v%j", n.Op, n.Val(), n)
@@ -1749,7 +1753,11 @@ func tconv(t *types.Type, flag FmtFlag, mode fmtMode, depth int) string {
 		return t.FieldType(0).String() + "," + t.FieldType(1).String()
 	}
 
-	if depth > 100 {
+	// Avoid endless recursion by setting an upper limit. This also
+	// limits the depths of valid composite types, but they are likely
+	// artificially created.
+	// TODO(gri) should have proper cycle detection here, eventually (issue #29312)
+	if depth > 250 {
 		return "<...>"
 	}
 

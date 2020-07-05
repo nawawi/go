@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"internal/x/net/http/httpguts"
+	"golang.org/x/net/http/httpguts"
 )
 
 // ReverseProxy is an HTTP Handler that takes an incoming request and
@@ -45,14 +45,13 @@ type ReverseProxy struct {
 	// after each write to the client.
 	// The FlushInterval is ignored when ReverseProxy
 	// recognizes a response as a streaming response;
-	// for such reponses, writes are flushed to the client
+	// for such responses, writes are flushed to the client
 	// immediately.
 	FlushInterval time.Duration
 
 	// ErrorLog specifies an optional logger for errors
 	// that occur when attempting to proxy the request.
-	// If nil, logging goes to os.Stderr via the log package's
-	// standard logger.
+	// If nil, logging is done via the log package's standard logger.
 	ErrorLog *log.Logger
 
 	// BufferPool optionally specifies a buffer pool to
@@ -132,16 +131,6 @@ func copyHeader(dst, src http.Header) {
 	}
 }
 
-func cloneHeader(h http.Header) http.Header {
-	h2 := make(http.Header, len(h))
-	for k, vv := range h {
-		vv2 := make([]string, len(vv))
-		copy(vv2, vv)
-		h2[k] = vv2
-	}
-	return h2
-}
-
 // Hop-by-hop headers. These are removed when sent to the backend.
 // As of RFC 7230, hop-by-hop headers are required to appear in the
 // Connection header field. These are the headers defined by the
@@ -171,6 +160,20 @@ func (p *ReverseProxy) getErrorHandler() func(http.ResponseWriter, *http.Request
 	return p.defaultErrorHandler
 }
 
+// modifyResponse conditionally runs the optional ModifyResponse hook
+// and reports whether the request should proceed.
+func (p *ReverseProxy) modifyResponse(rw http.ResponseWriter, res *http.Response, req *http.Request) bool {
+	if p.ModifyResponse == nil {
+		return true
+	}
+	if err := p.ModifyResponse(res); err != nil {
+		res.Body.Close()
+		p.getErrorHandler()(rw, req, err)
+		return false
+	}
+	return true
+}
+
 func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	transport := p.Transport
 	if transport == nil {
@@ -192,12 +195,13 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		}()
 	}
 
-	outreq := req.WithContext(ctx) // includes shallow copies of maps, but okay
+	outreq := req.Clone(ctx)
 	if req.ContentLength == 0 {
 		outreq.Body = nil // Issue 16036: nil Body for http.Transport retries
 	}
-
-	outreq.Header = cloneHeader(req.Header)
+	if outreq.Header == nil {
+		outreq.Header = make(http.Header) // Issue 33142: historical behavior was to always allocate
+	}
 
 	p.Director(outreq)
 	outreq.Close = false
@@ -250,6 +254,9 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 	// Deal with 101 Switching Protocols responses: (WebSocket, h2c, etc)
 	if res.StatusCode == http.StatusSwitchingProtocols {
+		if !p.modifyResponse(rw, res, outreq) {
+			return
+		}
 		p.handleUpgradeResponse(rw, outreq, res)
 		return
 	}
@@ -260,12 +267,8 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		res.Header.Del(h)
 	}
 
-	if p.ModifyResponse != nil {
-		if err := p.ModifyResponse(res); err != nil {
-			res.Body.Close()
-			p.getErrorHandler()(rw, outreq, err)
-			return
-		}
+	if !p.modifyResponse(rw, res, outreq) {
+		return
 	}
 
 	copyHeader(rw.Header(), res.Header)
@@ -344,10 +347,10 @@ func shouldPanicOnCopyError(req *http.Request) bool {
 // removeConnectionHeaders removes hop-by-hop headers listed in the "Connection" header of h.
 // See RFC 7230, section 6.1
 func removeConnectionHeaders(h http.Header) {
-	if c := h.Get("Connection"); c != "" {
-		for _, f := range strings.Split(c, ",") {
-			if f = strings.TrimSpace(f); f != "" {
-				h.Del(f)
+	for _, f := range h["Connection"] {
+		for _, sf := range strings.Split(f, ",") {
+			if sf = strings.TrimSpace(sf); sf != "" {
+				h.Del(sf)
 			}
 		}
 	}
@@ -376,6 +379,11 @@ func (p *ReverseProxy) copyResponse(dst io.Writer, src io.Reader, flushInterval 
 				latency: flushInterval,
 			}
 			defer mlw.stop()
+
+			// set up initial timer so headers get flushed even if body writes are delayed
+			mlw.flushPending = true
+			mlw.t = time.AfterFunc(flushInterval, mlw.delayedFlush)
+
 			dst = mlw
 		}
 	}
@@ -497,6 +505,9 @@ func (p *ReverseProxy) handleUpgradeResponse(rw http.ResponseWriter, req *http.R
 		p.getErrorHandler()(rw, req, fmt.Errorf("backend tried to switch protocol %q when %q was requested", resUpType, reqUpType))
 		return
 	}
+
+	copyHeader(res.Header, rw.Header())
+
 	hj, ok := rw.(http.Hijacker)
 	if !ok {
 		p.getErrorHandler()(rw, req, fmt.Errorf("can't switch protocols using non-Hijacker ResponseWriter type %T", rw))

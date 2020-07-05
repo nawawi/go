@@ -9,10 +9,10 @@ import (
 	"cmd/internal/bio"
 	"cmd/internal/objabi"
 	"cmd/internal/sys"
-	"cmd/internal/xcoff"
 	"cmd/link/internal/sym"
 	"errors"
 	"fmt"
+	"internal/xcoff"
 )
 
 // ldSection is an XCOFF section with its symbols.
@@ -27,7 +27,7 @@ type ldSection struct {
 type xcoffBiobuf bio.Reader
 
 func (f *xcoffBiobuf) ReadAt(p []byte, off int64) (int, error) {
-	ret := ((*bio.Reader)(f)).Seek(off, 0)
+	ret := ((*bio.Reader)(f)).MustSeek(off, 0)
 	if ret < 0 {
 		return 0, errors.New("fail to seek")
 	}

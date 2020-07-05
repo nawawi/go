@@ -117,7 +117,7 @@ func iimport(pkg *types.Pkg, in *bio.Reader) {
 	stringData := data[:sLen]
 	declData := data[sLen:]
 
-	in.Seek(int64(sLen+dLen), os.SEEK_CUR)
+	in.MustSeek(int64(sLen+dLen), os.SEEK_CUR)
 
 	p := &iimporter{
 		ipkg: pkg,
@@ -907,7 +907,9 @@ func (r *importReader) node() *Node {
 	// 	unreachable - mapped to OCALL case below by exporter
 
 	case OCALL:
-		n := nodl(r.pos(), OCALL, r.expr(), nil)
+		n := nodl(r.pos(), OCALL, nil, nil)
+		n.Ninit.Set(r.stmtList())
+		n.Left = r.expr()
 		n.List.Set(r.exprList())
 		n.SetIsDDD(r.bool())
 		return n
@@ -1053,7 +1055,7 @@ func (r *importReader) node() *Node {
 
 	default:
 		Fatalf("cannot import %v (%d) node\n"+
-			"==> please file an issue and assign to gri@\n", op, int(op))
+			"\t==> please file an issue and assign to gri@", op, int(op))
 		panic("unreachable") // satisfy compiler
 	}
 }

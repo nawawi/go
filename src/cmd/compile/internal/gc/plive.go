@@ -306,6 +306,8 @@ func (lv *Liveness) valueEffects(v *ssa.Value) (int32, liveEffect) {
 	//
 	// Addr is a read also, as any subseqent holder of the pointer must be able
 	// to see all the values (including initialization) written so far.
+	// This also prevents a variable from "coming back from the dead" and presenting
+	// stale pointers to the garbage collector. See issue 28445.
 	if e&(ssa.SymRead|ssa.SymAddr) != 0 {
 		effect |= uevar
 	}
@@ -1424,26 +1426,26 @@ func liveness(e *ssafn, f *ssa.Func, pp *Progs) LivenessMap {
 	}
 
 	// Emit the live pointer map data structures
-	if ls := e.curfn.Func.lsym; ls != nil {
-		ls.Func.GCArgs, ls.Func.GCLocals, ls.Func.GCRegs = lv.emit()
+	ls := e.curfn.Func.lsym
+	ls.Func.GCArgs, ls.Func.GCLocals, ls.Func.GCRegs = lv.emit()
 
-		p := pp.Prog(obj.AFUNCDATA)
-		Addrconst(&p.From, objabi.FUNCDATA_ArgsPointerMaps)
-		p.To.Type = obj.TYPE_MEM
-		p.To.Name = obj.NAME_EXTERN
-		p.To.Sym = ls.Func.GCArgs
+	p := pp.Prog(obj.AFUNCDATA)
+	Addrconst(&p.From, objabi.FUNCDATA_ArgsPointerMaps)
+	p.To.Type = obj.TYPE_MEM
+	p.To.Name = obj.NAME_EXTERN
+	p.To.Sym = ls.Func.GCArgs
 
-		p = pp.Prog(obj.AFUNCDATA)
-		Addrconst(&p.From, objabi.FUNCDATA_LocalsPointerMaps)
-		p.To.Type = obj.TYPE_MEM
-		p.To.Name = obj.NAME_EXTERN
-		p.To.Sym = ls.Func.GCLocals
+	p = pp.Prog(obj.AFUNCDATA)
+	Addrconst(&p.From, objabi.FUNCDATA_LocalsPointerMaps)
+	p.To.Type = obj.TYPE_MEM
+	p.To.Name = obj.NAME_EXTERN
+	p.To.Sym = ls.Func.GCLocals
 
-		p = pp.Prog(obj.AFUNCDATA)
-		Addrconst(&p.From, objabi.FUNCDATA_RegPointerMaps)
-		p.To.Type = obj.TYPE_MEM
-		p.To.Name = obj.NAME_EXTERN
-		p.To.Sym = ls.Func.GCRegs
-	}
+	p = pp.Prog(obj.AFUNCDATA)
+	Addrconst(&p.From, objabi.FUNCDATA_RegPointerMaps)
+	p.To.Type = obj.TYPE_MEM
+	p.To.Name = obj.NAME_EXTERN
+	p.To.Sym = ls.Func.GCRegs
+
 	return lv.livenessMap
 }

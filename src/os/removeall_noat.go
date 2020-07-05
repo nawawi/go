@@ -11,11 +11,7 @@ import (
 	"syscall"
 )
 
-// RemoveAll removes path and any children it contains.
-// It removes everything it can but returns the first error
-// it encounters. If the path does not exist, RemoveAll
-// returns nil (no error).
-func RemoveAll(path string) error {
+func removeAll(path string) error {
 	if path == "" {
 		// fail silently to retain compatibility with previous behavior
 		// of RemoveAll. See issue 28830.
@@ -60,8 +56,30 @@ func RemoveAll(path string) error {
 			return err
 		}
 
-		const request = 1024
-		names, err1 := fd.Readdirnames(request)
+		const reqSize = 1024
+		var names []string
+		var readErr error
+
+		for {
+			numErr := 0
+			names, readErr = fd.Readdirnames(reqSize)
+
+			for _, name := range names {
+				err1 := RemoveAll(path + string(PathSeparator) + name)
+				if err == nil {
+					err = err1
+				}
+				if err1 != nil {
+					numErr++
+				}
+			}
+
+			// If we can delete any entry, break to start new iteration.
+			// Otherwise, we discard current names, get next entries and try deleting them.
+			if numErr != reqSize {
+				break
+			}
+		}
 
 		// Removing files from the directory may have caused
 		// the OS to reshuffle it. Simply calling Readdirnames
@@ -70,19 +88,12 @@ func RemoveAll(path string) error {
 		// directory. See issue 20841.
 		fd.Close()
 
-		for _, name := range names {
-			err1 := RemoveAll(path + string(PathSeparator) + name)
-			if err == nil {
-				err = err1
-			}
-		}
-
-		if err1 == io.EOF {
+		if readErr == io.EOF {
 			break
 		}
 		// If Readdirnames returned an error, use it.
 		if err == nil {
-			err = err1
+			err = readErr
 		}
 		if len(names) == 0 {
 			break
@@ -92,7 +103,7 @@ func RemoveAll(path string) error {
 		// got fewer than request names from Readdirnames, try
 		// simply removing the directory now. If that
 		// succeeds, we are done.
-		if len(names) < request {
+		if len(names) < reqSize {
 			err1 := Remove(path)
 			if err1 == nil || IsNotExist(err1) {
 				return nil
@@ -113,6 +124,7 @@ func RemoveAll(path string) error {
 
 	// Remove directory.
 	err1 := Remove(path)
+	err1 = removeAllTestHook(err1)
 	if err1 == nil || IsNotExist(err1) {
 		return nil
 	}

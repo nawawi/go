@@ -97,6 +97,7 @@ type Func struct {
 	Frame    int64      // size in bytes of local variable frame
 	Leaf     bool       // function omits save of link register (ARM)
 	NoSplit  bool       // function omits stack split prologue
+	TopFrame bool       // function is the top of the call stack
 	Var      []Var      // detail about local variables
 	PCSP     Data       // PC → SP offset map
 	PCFile   Data       // PC → file number map (index into File)
@@ -119,10 +120,11 @@ type FuncData struct {
 // An InlinedCall is a node in an InlTree.
 // See cmd/internal/obj.InlTree for details.
 type InlinedCall struct {
-	Parent int64
-	File   string
-	Line   int64
-	Func   SymID
+	Parent   int64
+	File     string
+	Line     int64
+	Func     SymID
+	ParentPC int64
 }
 
 // A Package is a parsed Go object file or archive defining a Go package.
@@ -575,6 +577,7 @@ func (r *objReader) parseObject(prefix []byte) error {
 			f.Frame = r.readInt()
 			flags := r.readInt()
 			f.Leaf = flags&(1<<0) != 0
+			f.TopFrame = flags&(1<<4) != 0
 			f.NoSplit = r.readInt() != 0
 			f.Var = make([]Var, r.readInt())
 			for i := range f.Var {
@@ -610,6 +613,7 @@ func (r *objReader) parseObject(prefix []byte) error {
 				f.InlTree[i].File = r.readSymID().Name
 				f.InlTree[i].Line = r.readInt()
 				f.InlTree[i].Func = r.readSymID()
+				f.InlTree[i].ParentPC = r.readInt()
 			}
 		}
 	}

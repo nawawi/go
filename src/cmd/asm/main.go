@@ -36,7 +36,7 @@ func main() {
 
 	ctxt := obj.Linknew(architecture.LinkArch)
 	if *flags.PrintOut {
-		ctxt.Debugasm = true
+		ctxt.Debugasm = 1
 	}
 	ctxt.Flag_dynlink = *flags.Dynlink
 	ctxt.Flag_shared = *flags.Shared || *flags.Dynlink
@@ -83,7 +83,7 @@ func main() {
 		}
 	}
 	if ok && !*flags.SymABIs {
-		obj.WriteObjFile(ctxt, buf)
+		obj.WriteObjFile(ctxt, buf, "")
 	}
 	if !ok || diag {
 		if failedFile != "" {

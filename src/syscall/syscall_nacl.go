@@ -5,6 +5,7 @@
 package syscall
 
 import (
+	"internal/oserror"
 	"sync"
 	"unsafe"
 )
@@ -50,6 +51,12 @@ const PathMax = 256
 //	if errno != 0 {
 //		err = errno
 //	}
+//
+// Errno values can be tested against error values from the the os package
+// using errors.Is. For example:
+//
+//	_, _, err := syscall.Syscall(...)
+//	if errors.Is(err, os.ErrNotExist) ...
 type Errno uintptr
 
 func (e Errno) Error() string {
@@ -60,6 +67,18 @@ func (e Errno) Error() string {
 		}
 	}
 	return "errno " + itoa(int(e))
+}
+
+func (e Errno) Is(target error) bool {
+	switch target {
+	case oserror.ErrPermission:
+		return e == EACCES || e == EPERM
+	case oserror.ErrExist:
+		return e == EEXIST || e == ENOTEMPTY
+	case oserror.ErrNotExist:
+		return e == ENOENT
+	}
+	return false
 }
 
 func (e Errno) Temporary() bool {
