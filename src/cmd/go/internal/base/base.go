@@ -7,11 +7,9 @@
 package base
 
 import (
-	"bytes"
-	"errors"
+	"context"
 	"flag"
 	"fmt"
-	"go/scanner"
 	"log"
 	"os"
 	"os/exec"
@@ -27,7 +25,7 @@ import (
 type Command struct {
 	// Run runs the command.
 	// The args are the arguments after the command name.
-	Run func(cmd *Command, args []string)
+	Run func(ctx context.Context, cmd *Command, args []string)
 
 	// UsageLine is the one-line usage message.
 	// The words between "go" and the first flag or argument in the line are taken to be the command name.
@@ -172,25 +170,3 @@ func RunStdin(cmdline []string) {
 // Usage is the usage-reporting function, filled in by package main
 // but here for reference by other packages.
 var Usage func()
-
-// ExpandScanner expands a scanner.List error into all the errors in the list.
-// The default Error method only shows the first error
-// and does not shorten paths.
-func ExpandScanner(err error) error {
-	// Look for parser errors.
-	if err, ok := err.(scanner.ErrorList); ok {
-		// Prepare error with \n before each message.
-		// When printed in something like context: %v
-		// this will put the leading file positions each on
-		// its own line. It will also show all the errors
-		// instead of just the first, as err.Error does.
-		var buf bytes.Buffer
-		for _, e := range err {
-			e.Pos.Filename = ShortPath(e.Pos.Filename)
-			buf.WriteString("\n")
-			buf.WriteString(e.Error())
-		}
-		return errors.New(buf.String())
-	}
-	return err
-}

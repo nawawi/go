@@ -179,7 +179,7 @@ func TestCover(t *testing.T) {
 	}
 	lines := bytes.Split(file, []byte("\n"))
 	for i, line := range lines {
-		lines[i] = bytes.Replace(line, []byte("LINE"), []byte(fmt.Sprint(i+1)), -1)
+		lines[i] = bytes.ReplaceAll(line, []byte("LINE"), []byte(fmt.Sprint(i+1)))
 	}
 
 	// Add a function that is not gofmt'ed. This used to cause a crash.
@@ -457,7 +457,7 @@ func TestHtmlUnformatted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := ioutil.WriteFile(filepath.Join(htmlUDir, "go.mod"), []byte("module htmlunformatted\n"), 0444); err != nil {
+	if err := ioutil.WriteFile(filepath.Join(htmlUDir, "go.mod"), []byte("module htmlunformatted\n"), 0666); err != nil {
 		t.Fatal(err)
 	}
 
@@ -540,7 +540,7 @@ func TestFuncWithDuplicateLines(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := ioutil.WriteFile(filepath.Join(lineDupDir, "go.mod"), []byte("module linedup\n"), 0444); err != nil {
+	if err := ioutil.WriteFile(filepath.Join(lineDupDir, "go.mod"), []byte("module linedup\n"), 0666); err != nil {
 		t.Fatal(err)
 	}
 	if err := ioutil.WriteFile(lineDupGo, []byte(lineDupContents), 0444); err != nil {

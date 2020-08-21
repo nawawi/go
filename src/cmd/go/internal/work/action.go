@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"bytes"
 	"container/heap"
+	"context"
 	"debug/elf"
 	"encoding/json"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"cmd/go/internal/cache"
 	"cmd/go/internal/cfg"
 	"cmd/go/internal/load"
+	"cmd/go/internal/trace"
 	"cmd/internal/buildid"
 )
 
@@ -41,7 +43,7 @@ type Builder struct {
 	IsCmdList           bool // running as part of go list; set p.Stale and additional fields below
 	NeedError           bool // list needs p.Error
 	NeedExport          bool // list needs p.Export
-	NeedCompiledGoFiles bool // list needs p.CompiledGoFIles
+	NeedCompiledGoFiles bool // list needs p.CompiledGoFiles
 
 	objdirSeq int // counter for NewObjdir
 	pkgSeq    int
@@ -63,13 +65,13 @@ type Builder struct {
 
 // An Action represents a single action in the action graph.
 type Action struct {
-	Mode       string                        // description of action operation
-	Package    *load.Package                 // the package this action works on
-	Deps       []*Action                     // actions that must happen before this one
-	Func       func(*Builder, *Action) error // the action itself (nil = no-op)
-	IgnoreFail bool                          // whether to run f even if dependencies fail
-	TestOutput *bytes.Buffer                 // test output buffer
-	Args       []string                      // additional args for runProgram
+	Mode       string                                         // description of action operation
+	Package    *load.Package                                  // the package this action works on
+	Deps       []*Action                                      // actions that must happen before this one
+	Func       func(*Builder, context.Context, *Action) error // the action itself (nil = no-op)
+	IgnoreFail bool                                           // whether to run f even if dependencies fail
+	TestOutput *bytes.Buffer                                  // test output buffer
+	Args       []string                                       // additional args for runProgram
 
 	triggers []*Action // inverse of deps
 
@@ -91,10 +93,11 @@ type Action struct {
 	output    []byte     // output redirect buffer (nil means use b.Print)
 
 	// Execution state.
-	pending  int         // number of deps yet to complete
-	priority int         // relative execution priority
-	Failed   bool        // whether the action failed
-	json     *actionJSON // action graph information
+	pending   int         // number of deps yet to complete
+	priority  int         // relative execution priority
+	Failed    bool        // whether the action failed
+	json      *actionJSON // action graph information
+	traceSpan *trace.Span
 }
 
 // BuildActionID returns the action ID section of a's build ID.
@@ -290,11 +293,12 @@ func (b *Builder) Init() {
 		}
 	}
 
-	if _, ok := cfg.OSArchSupportsCgo[cfg.Goos+"/"+cfg.Goarch]; !ok && cfg.BuildContext.Compiler == "gc" {
-		fmt.Fprintf(os.Stderr, "cmd/go: unsupported GOOS/GOARCH pair %s/%s\n", cfg.Goos, cfg.Goarch)
+	if err := CheckGOOSARCHPair(cfg.Goos, cfg.Goarch); err != nil {
+		fmt.Fprintf(os.Stderr, "cmd/go: %v\n", err)
 		base.SetExitStatus(2)
 		base.Exit()
 	}
+
 	for _, tag := range cfg.BuildContext.BuildTags {
 		if strings.Contains(tag, ",") {
 			fmt.Fprintf(os.Stderr, "cmd/go: -tags space-separated list contains comma\n")
@@ -302,6 +306,13 @@ func (b *Builder) Init() {
 			base.Exit()
 		}
 	}
+}
+
+func CheckGOOSARCHPair(goos, goarch string) error {
+	if _, ok := cfg.OSArchSupportsCgo[goos+"/"+goarch]; !ok && cfg.BuildContext.Compiler == "gc" {
+		return fmt.Errorf("unsupported GOOS/GOARCH pair %s/%s", goos, goarch)
+	}
+	return nil
 }
 
 // NewObjdir returns the name of a fresh object directory under b.WorkDir.
@@ -702,7 +713,7 @@ func (b *Builder) addInstallHeaderAction(a *Action) {
 }
 
 // buildmodeShared takes the "go build" action a1 into the building of a shared library of a1.Deps.
-// That is, the input a1 represents "go build pkgs" and the result represents "go build -buidmode=shared pkgs".
+// That is, the input a1 represents "go build pkgs" and the result represents "go build -buildmode=shared pkgs".
 func (b *Builder) buildmodeShared(mode, depMode BuildMode, args []string, pkgs []*load.Package, a1 *Action) *Action {
 	name, err := libname(args, pkgs)
 	if err != nil {

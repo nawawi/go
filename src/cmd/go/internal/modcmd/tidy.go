@@ -7,14 +7,11 @@
 package modcmd
 
 import (
-	"fmt"
-	"os"
-
 	"cmd/go/internal/base"
 	"cmd/go/internal/cfg"
-	"cmd/go/internal/modfetch"
 	"cmd/go/internal/modload"
-	"cmd/go/internal/module"
+	"cmd/go/internal/work"
+	"context"
 )
 
 var cmdTidy = &base.Command{
@@ -35,68 +32,16 @@ to standard error.
 func init() {
 	cmdTidy.Run = runTidy // break init cycle
 	cmdTidy.Flag.BoolVar(&cfg.BuildV, "v", false, "")
+	work.AddModCommonFlags(cmdTidy)
 }
 
-func runTidy(cmd *base.Command, args []string) {
+func runTidy(ctx context.Context, cmd *base.Command, args []string) {
 	if len(args) > 0 {
 		base.Fatalf("go mod tidy: no arguments allowed")
 	}
 
-	// LoadALL adds missing modules.
-	// Remove unused modules.
-	used := make(map[module.Version]bool)
-	for _, pkg := range modload.LoadALL() {
-		used[modload.PackageModule(pkg)] = true
-	}
-	used[modload.Target] = true // note: LoadALL initializes Target
-
-	inGoMod := make(map[string]bool)
-	for _, r := range modload.ModFile().Require {
-		inGoMod[r.Mod.Path] = true
-	}
-
-	var keep []module.Version
-	for _, m := range modload.BuildList() {
-		if used[m] {
-			keep = append(keep, m)
-		} else if cfg.BuildV && inGoMod[m.Path] {
-			fmt.Fprintf(os.Stderr, "unused %s\n", m.Path)
-		}
-	}
-	modload.SetBuildList(keep)
-	modTidyGoSum() // updates memory copy; WriteGoMod on next line flushes it out
+	modload.LoadALL(ctx)
+	modload.TidyBuildList()
+	modload.TrimGoSum()
 	modload.WriteGoMod()
-}
-
-// modTidyGoSum resets the go.sum file content
-// to be exactly what's needed for the current go.mod.
-func modTidyGoSum() {
-	// Assuming go.sum already has at least enough from the successful load,
-	// we only have to tell modfetch what needs keeping.
-	reqs := modload.Reqs()
-	keep := make(map[module.Version]bool)
-	replaced := make(map[module.Version]bool)
-	var walk func(module.Version)
-	walk = func(m module.Version) {
-		// If we build using a replacement module, keep the sum for the replacement,
-		// since that's the code we'll actually use during a build.
-		//
-		// TODO(golang.org/issue/29182): Perhaps we should keep both sums, and the
-		// sums for both sets of transitive requirements.
-		r := modload.Replacement(m)
-		if r.Path == "" {
-			keep[m] = true
-		} else {
-			keep[r] = true
-			replaced[m] = true
-		}
-		list, _ := reqs.Required(m)
-		for _, r := range list {
-			if !keep[r] && !replaced[r] {
-				walk(r)
-			}
-		}
-	}
-	walk(modload.Target)
-	modfetch.TrimGoSum(keep)
 }

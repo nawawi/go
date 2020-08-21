@@ -8,6 +8,7 @@ package doc
 import (
 	"cmd/go/internal/base"
 	"cmd/go/internal/cfg"
+	"context"
 )
 
 var CmdDoc = &base.Command{
@@ -114,6 +115,8 @@ Flags:
 		Treat a command (package main) like a regular package.
 		Otherwise package main's exported symbols are hidden
 		when showing the package's top-level documentation.
+	-short
+		One-line representation for each symbol.
 	-src
 		Show the full source code for the symbol. This will
 		display the full Go source of its declaration and
@@ -127,6 +130,6 @@ Flags:
 `,
 }
 
-func runDoc(cmd *base.Command, args []string) {
+func runDoc(ctx context.Context, cmd *base.Command, args []string) {
 	base.Run(cfg.BuildToolexec, base.Tool("doc"), args)
 }

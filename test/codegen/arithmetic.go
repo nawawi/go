@@ -71,7 +71,13 @@ func Mul_96(n int) int {
 	// 386:`SHLL\t[$]5`,`LEAL\t\(.*\)\(.*\*2\),`,-`IMULL`
 	// arm64:`LSL\t[$]5`,`ADD\sR[0-9]+<<1,\sR[0-9]+`,-`MUL`
 	// arm:`SLL\t[$]5`,`ADD\sR[0-9]+<<1,\sR[0-9]+`,-`MUL`
+	// s390x:`SLD\t[$]5`,`SLD\t[$]6`,-`MULLD`
 	return n * 96
+}
+
+func Mul_n120(n int) int {
+	// s390x:`SLD\t[$]3`,`SLD\t[$]7`,-`MULLD`
+	return n * -120
 }
 
 func MulMemSrc(a []uint32, b []float32) {
@@ -188,14 +194,24 @@ func Pow2Mods(n1 uint, n2 int) (uint, int) {
 }
 
 // Check that signed divisibility checks get converted to AND on low bits
-func Pow2DivisibleSigned(n int) bool {
+func Pow2DivisibleSigned(n1, n2 int) (bool, bool) {
 	// 386:"TESTL\t[$]63",-"DIVL",-"SHRL"
 	// amd64:"TESTQ\t[$]63",-"DIVQ",-"SHRQ"
 	// arm:"AND\t[$]63",-".*udiv",-"SRA"
 	// arm64:"AND\t[$]63",-"UDIV",-"ASR"
 	// ppc64:"ANDCC\t[$]63",-"SRAD"
 	// ppc64le:"ANDCC\t[$]63",-"SRAD"
-	return n%64 == 0 // signed
+	a := n1%64 == 0 // signed divisible
+
+	// 386:"TESTL\t[$]63",-"DIVL",-"SHRL"
+	// amd64:"TESTQ\t[$]63",-"DIVQ",-"SHRQ"
+	// arm:"AND\t[$]63",-".*udiv",-"SRA"
+	// arm64:"AND\t[$]63",-"UDIV",-"ASR"
+	// ppc64:"ANDCC\t[$]63",-"SRAD"
+	// ppc64le:"ANDCC\t[$]63",-"SRAD"
+	b := n2%64 != 0 // signed indivisible
+
+	return a, b
 }
 
 // Check that constant modulo divs get turned into MULs
@@ -237,16 +253,20 @@ func Divisible(n1 uint, n2 int) (bool, bool, bool, bool) {
 	// 386:"IMUL3L\t[$]-1431655765","ADDL\t[$]715827882","ROLL\t[$]31",-"DIVQ"
 	// arm64:"MUL","ADD\t[$]3074457345618258602","ROR",-"DIV"
 	// arm:"MUL","ADD\t[$]715827882",-".*udiv"
-	// ppc64:"MULLD","ADD","ROTL\t[$]63"
-	// ppc64le:"MULLD","ADD","ROTL\t[$]63"
+	// ppc64/power8:"MULLD","ADD","ROTL\t[$]63"
+	// ppc64le/power8:"MULLD","ADD","ROTL\t[$]63"
+	// ppc64/power9:"MADDLD","ROTL\t[$]63"
+	// ppc64le/power9:"MADDLD","ROTL\t[$]63"
 	evenS := n2%6 == 0
 
 	// amd64:"IMULQ","ADD",-"ROLQ",-"DIVQ"
 	// 386:"IMUL3L\t[$]678152731","ADDL\t[$]113025455",-"ROLL",-"DIVQ"
 	// arm64:"MUL","ADD\t[$]485440633518672410",-"ROR",-"DIV"
 	// arm:"MUL","ADD\t[$]113025455",-".*udiv"
-	// ppc64:"MULLD","ADD",-"ROTL"
-	// ppc64le:"MULLD","ADD",-"ROTL"
+	// ppc64/power8:"MULLD","ADD",-"ROTL"
+	// ppc64/power9:"MADDLD",-"ROTL"
+	// ppc64le/power8:"MULLD","ADD",-"ROTL"
+	// ppc64le/power9:"MADDLD",-"ROTL"
 	oddS := n2%19 == 0
 
 	return evenU, oddU, evenS, oddS
@@ -440,4 +460,15 @@ func addSpecial(a, b, c uint32) (uint32, uint32, uint32) {
 	// amd64:`SUBL.*-128`
 	c += 128
 	return a, b, c
+}
+
+
+// Divide -> shift rules usually require fixup for negative inputs.
+// If the input is non-negative, make sure the fixup is eliminated.
+func divInt(v int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	// amd64:-`.*SARQ.*63,`, -".*SHRQ", ".*SARQ.*[$]9,"
+	return v / 512
 }

@@ -25,7 +25,7 @@ func mapaccess1_fast64(t *maptype, h *hmap, key uint64) unsafe.Pointer {
 		// One-bucket table. No need to hash.
 		b = (*bmap)(h.buckets)
 	} else {
-		hash := t.key.alg.hash(noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
+		hash := t.hasher(noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
 		m := bucketMask(h.B)
 		b = (*bmap)(add(h.buckets, (hash&m)*uintptr(t.bucketsize)))
 		if c := h.oldbuckets; c != nil {
@@ -65,7 +65,7 @@ func mapaccess2_fast64(t *maptype, h *hmap, key uint64) (unsafe.Pointer, bool) {
 		// One-bucket table. No need to hash.
 		b = (*bmap)(h.buckets)
 	} else {
-		hash := t.key.alg.hash(noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
+		hash := t.hasher(noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
 		m := bucketMask(h.B)
 		b = (*bmap)(add(h.buckets, (hash&m)*uintptr(t.bucketsize)))
 		if c := h.oldbuckets; c != nil {
@@ -100,9 +100,9 @@ func mapassign_fast64(t *maptype, h *hmap, key uint64) unsafe.Pointer {
 	if h.flags&hashWriting != 0 {
 		throw("concurrent map writes")
 	}
-	hash := t.key.alg.hash(noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
+	hash := t.hasher(noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
 
-	// Set hashWriting after calling alg.hash for consistency with mapassign.
+	// Set hashWriting after calling t.hasher for consistency with mapassign.
 	h.flags ^= hashWriting
 
 	if h.buckets == nil {
@@ -190,9 +190,9 @@ func mapassign_fast64ptr(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer
 	if h.flags&hashWriting != 0 {
 		throw("concurrent map writes")
 	}
-	hash := t.key.alg.hash(noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
+	hash := t.hasher(noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
 
-	// Set hashWriting after calling alg.hash for consistency with mapassign.
+	// Set hashWriting after calling t.hasher for consistency with mapassign.
 	h.flags ^= hashWriting
 
 	if h.buckets == nil {
@@ -281,9 +281,9 @@ func mapdelete_fast64(t *maptype, h *hmap, key uint64) {
 		throw("concurrent map writes")
 	}
 
-	hash := t.key.alg.hash(noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
+	hash := t.hasher(noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
 
-	// Set hashWriting after calling alg.hash for consistency with mapdelete
+	// Set hashWriting after calling t.hasher for consistency with mapdelete
 	h.flags ^= hashWriting
 
 	bucket := hash & bucketMask(h.B)
@@ -300,7 +300,13 @@ search:
 			}
 			// Only clear key if there are pointers in it.
 			if t.key.ptrdata != 0 {
-				memclrHasPointers(k, t.key.size)
+				if sys.PtrSize == 8 {
+					*(*unsafe.Pointer)(k) = nil
+				} else {
+					// There are three ways to squeeze at one ore more 32 bit pointers into 64 bits.
+					// Just call memclrHasPointers instead of trying to handle all cases here.
+					memclrHasPointers(k, 8)
+				}
 			}
 			e := add(unsafe.Pointer(b), dataOffset+bucketCnt*8+i*uintptr(t.elemsize))
 			if t.elem.ptrdata != 0 {
@@ -400,7 +406,7 @@ func evacuate_fast64(t *maptype, h *hmap, oldbucket uintptr) {
 				if !h.sameSizeGrow() {
 					// Compute hash to make our evacuation decision (whether we need
 					// to send this key/elem to bucket x or bucket y).
-					hash := t.key.alg.hash(k, uintptr(h.hash0))
+					hash := t.hasher(k, uintptr(h.hash0))
 					if hash&newbit != 0 {
 						useY = 1
 					}

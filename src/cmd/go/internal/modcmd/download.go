@@ -5,30 +5,36 @@
 package modcmd
 
 import (
-	"cmd/go/internal/cfg"
+	"context"
 	"encoding/json"
 	"os"
+	"runtime"
 
 	"cmd/go/internal/base"
-	"cmd/go/internal/modfetch"
+	"cmd/go/internal/cfg"
 	"cmd/go/internal/modload"
-	"cmd/go/internal/module"
-	"cmd/go/internal/par"
+	"cmd/go/internal/modfetch"
+	"cmd/go/internal/work"
+
+	"golang.org/x/mod/module"
 )
 
 var cmdDownload = &base.Command{
-	UsageLine: "go mod download [-json] [modules]",
+	UsageLine: "go mod download [-x] [-json] [modules]",
 	Short:     "download modules to local cache",
 	Long: `
 Download downloads the named modules, which can be module patterns selecting
 dependencies of the main module or module queries of the form path@version.
-With no arguments, download applies to all dependencies of the main module.
+With no arguments, download applies to all dependencies of the main module
+(equivalent to 'go mod download all').
 
 The go command will automatically download modules as needed during ordinary
 execution. The "go mod download" command is useful mainly for pre-filling
 the local cache or to compute the answers for a Go module proxy.
 
-By default, download reports errors to standard error but is otherwise silent.
+By default, download writes nothing to standard output. It may print progress
+messages and errors to standard error.
+
 The -json flag causes download to print a sequence of JSON objects
 to standard output, describing each downloaded module (or failure),
 corresponding to this Go struct:
@@ -43,8 +49,9 @@ corresponding to this Go struct:
         Dir      string // absolute path to cached source root directory
         Sum      string // checksum for path, version (as in go.sum)
         GoModSum string // checksum for go.mod (as in go.sum)
-        Latest   bool   // would @latest resolve to this version?
     }
+
+The -x flag causes download to print the commands download executes.
 
 See 'go help modules' for more about module queries.
 	`,
@@ -54,6 +61,10 @@ var downloadJSON = cmdDownload.Flag.Bool("json", false, "")
 
 func init() {
 	cmdDownload.Run = runDownload // break init cycle
+
+	// TODO(jayconrod): https://golang.org/issue/35849 Apply -x to other 'go mod' commands.
+	cmdDownload.Flag.BoolVar(&cfg.BuildX, "x", false, "")
+	work.AddModCommonFlags(cmdDownload)
 }
 
 type moduleJSON struct {
@@ -66,10 +77,9 @@ type moduleJSON struct {
 	Dir      string `json:",omitempty"`
 	Sum      string `json:",omitempty"`
 	GoModSum string `json:",omitempty"`
-	Latest   bool   `json:",omitempty"`
 }
 
-func runDownload(cmd *base.Command, args []string) {
+func runDownload(ctx context.Context, cmd *base.Command, args []string) {
 	// Check whether modules are enabled and whether we're in a module.
 	if cfg.Getenv("GO111MODULE") == "off" {
 		base.Fatalf("go: modules disabled by GO111MODULE=off; see 'go help modules'")
@@ -79,59 +89,20 @@ func runDownload(cmd *base.Command, args []string) {
 	}
 	if len(args) == 0 {
 		args = []string{"all"}
-	}
-
-	var mods []*moduleJSON
-	var work par.Work
-	listU := false
-	listVersions := false
-	for _, info := range modload.ListModules(args, listU, listVersions) {
-		if info.Replace != nil {
-			info = info.Replace
-		}
-		if info.Version == "" && info.Error == nil {
-			// main module
-			continue
-		}
-		m := &moduleJSON{
-			Path:    info.Path,
-			Version: info.Version,
-		}
-		mods = append(mods, m)
-		if info.Error != nil {
-			m.Error = info.Error.Err
-			continue
-		}
-		work.Add(m)
-	}
-
-	latest := map[string]string{} // path → version
-	if *downloadJSON {
-		// We need to populate the Latest field, but if the main module depends on a
-		// version newer than latest — or if the version requested on the command
-		// line is itself newer than latest — that's not trivial to determine from
-		// the info returned by ListModules. Instead, we issue a separate
-		// ListModules request for "latest", which should be inexpensive relative to
-		// downloading the modules.
-		var latestArgs []string
-		for _, m := range mods {
-			if m.Error != "" {
-				continue
-			}
-			latestArgs = append(latestArgs, m.Path+"@latest")
-		}
-
-		if len(latestArgs) > 0 {
-			for _, info := range modload.ListModules(latestArgs, listU, listVersions) {
-				if info.Version != "" {
-					latest[info.Path] = info.Version
-				}
+	} else if modload.HasModRoot() {
+		modload.InitMod(ctx) // to fill Target
+		targetAtLatest := modload.Target.Path + "@latest"
+		targetAtUpgrade := modload.Target.Path + "@upgrade"
+		targetAtPatch := modload.Target.Path + "@patch"
+		for _, arg := range args {
+			switch arg {
+			case modload.Target.Path, targetAtLatest, targetAtUpgrade, targetAtPatch:
+				os.Stderr.WriteString("go mod download: skipping argument " + arg + " that resolves to the main module\n")
 			}
 		}
 	}
 
-	work.Do(10, func(item interface{}) {
-		m := item.(*moduleJSON)
+	downloadModule := func(m *moduleJSON) {
 		var err error
 		m.Info, err = modfetch.InfoFile(m.Path, m.Version)
 		if err != nil {
@@ -149,21 +120,53 @@ func runDownload(cmd *base.Command, args []string) {
 			return
 		}
 		mod := module.Version{Path: m.Path, Version: m.Version}
-		m.Zip, err = modfetch.DownloadZip(mod)
+		m.Zip, err = modfetch.DownloadZip(ctx, mod)
 		if err != nil {
 			m.Error = err.Error()
 			return
 		}
 		m.Sum = modfetch.Sum(mod)
-		m.Dir, err = modfetch.Download(mod)
+		m.Dir, err = modfetch.Download(ctx, mod)
 		if err != nil {
 			m.Error = err.Error()
 			return
 		}
-		if latest[m.Path] == m.Version {
-			m.Latest = true
+	}
+
+	var mods []*moduleJSON
+	listU := false
+	listVersions := false
+	type token struct{}
+	sem := make(chan token, runtime.GOMAXPROCS(0))
+	for _, info := range modload.ListModules(ctx, args, listU, listVersions) {
+		if info.Replace != nil {
+			info = info.Replace
 		}
-	})
+		if info.Version == "" && info.Error == nil {
+			// main module or module replaced with file path.
+			// Nothing to download.
+			continue
+		}
+		m := &moduleJSON{
+			Path:    info.Path,
+			Version: info.Version,
+		}
+		mods = append(mods, m)
+		if info.Error != nil {
+			m.Error = info.Error.Err
+			continue
+		}
+		sem <- token{}
+		go func() {
+			downloadModule(m)
+			<-sem
+		}()
+	}
+
+	// Fill semaphore channel to wait for goroutines to finish.
+	for n := cap(sem); n > 0; n-- {
+		sem <- token{}
+	}
 
 	if *downloadJSON {
 		for _, m := range mods {

@@ -9,10 +9,12 @@ package gc
 import (
 	"bufio"
 	"bytes"
+	"cmd/compile/internal/logopt"
 	"cmd/compile/internal/ssa"
 	"cmd/compile/internal/types"
 	"cmd/internal/bio"
 	"cmd/internal/dwarf"
+	"cmd/internal/goobj"
 	"cmd/internal/obj"
 	"cmd/internal/objabi"
 	"cmd/internal/src"
@@ -35,14 +37,18 @@ import (
 var imported_unsafe bool
 
 var (
-	buildid string
+	buildid      string
+	spectre      string
+	spectreIndex bool
 )
 
 var (
 	Debug_append       int
+	Debug_checkptr     int
 	Debug_closure      int
 	Debug_compilelater int
 	debug_dclstack     int
+	Debug_libfuzzer    int
 	Debug_panic        int
 	Debug_slice        int
 	Debug_vlog         bool
@@ -52,6 +58,7 @@ var (
 	Debug_typecheckinl int
 	Debug_gendwarfinl  int
 	Debug_softfloat    int
+	Debug_defer        int
 )
 
 // Debug arguments.
@@ -65,11 +72,13 @@ var debugtab = []struct {
 	val  interface{} // must be *int or *string
 }{
 	{"append", "print information about append compilation", &Debug_append},
+	{"checkptr", "instrument unsafe pointer conversions", &Debug_checkptr},
 	{"closure", "print information about closure compilation", &Debug_closure},
 	{"compilelater", "compile functions as late as possible", &Debug_compilelater},
 	{"disablenil", "disable nil checks", &disable_checknil},
 	{"dclstack", "run internal dclstack check", &debug_dclstack},
 	{"gcprog", "print dump of GC programs", &Debug_gcprog},
+	{"libfuzzer", "coverage instrumentation for libfuzzer", &Debug_libfuzzer},
 	{"nil", "print information about nil checks", &Debug_checknil},
 	{"panic", "do not hide any compiler panic", &Debug_panic},
 	{"slice", "print information about slice compilation", &Debug_slice},
@@ -81,6 +90,7 @@ var debugtab = []struct {
 	{"typecheckinl", "eager typechecking of inline function bodies", &Debug_typecheckinl},
 	{"dwarfinl", "print information about DWARF inlined function creation", &Debug_gendwarfinl},
 	{"softfloat", "force compiler to emit soft-float code", &Debug_softfloat},
+	{"defer", "print information about defer compilation", &Debug_defer},
 }
 
 const debugHelpHeader = `usage: -d arg[,arg]* and arg is <key>[=<value>]
@@ -91,6 +101,11 @@ const debugHelpHeader = `usage: -d arg[,arg]* and arg is <key>[=<value>]
 
 const debugHelpFooter = `
 <value> is key-specific.
+
+Key "checkptr" supports values:
+	"0": instrumentation disabled
+	"1": conversions involving unsafe.Pointer are instrumented
+	"2": conversions to unsafe.Pointer force heap allocation
 
 Key "pctab" supports values:
 	"pctospadj", "pctofile", "pctoline", "pctoinline", "pctopcdata"
@@ -187,12 +202,12 @@ func Main(archInit func(*Arch)) {
 	// pseudo-package used for methods with anonymous receivers
 	gopkg = types.NewPkg("go", "")
 
-	Nacl = objabi.GOOS == "nacl"
 	Wasm := objabi.GOARCH == "wasm"
 
 	// Whether the limit for stack-allocated objects is much smaller than normal.
 	// This can be helpful for diagnosing certain causes of GC latency. See #27732.
 	smallFrames := false
+	jsonLogOpt := ""
 
 	flag.BoolVar(&compiling_runtime, "+", false, "compiling runtime")
 	flag.BoolVar(&compiling_std, "std", false, "compiling standard library")
@@ -238,7 +253,7 @@ func Main(archInit func(*Arch)) {
 	if sys.RaceDetectorSupported(objabi.GOOS, objabi.GOARCH) {
 		flag.BoolVar(&flag_race, "race", false, "enable race detector")
 	}
-	objabi.Flagcount("s", "warn about composite literals that can be simplified", &Debug['s'])
+	flag.StringVar(&spectre, "spectre", spectre, "enable spectre mitigations in `list` (all, index, ret)")
 	if enableTrace {
 		flag.BoolVar(&trace, "t", false, "trace type-checking")
 	}
@@ -251,6 +266,7 @@ func Main(archInit func(*Arch)) {
 	if supportsDynlink(thearch.LinkArch.Arch) {
 		flag.BoolVar(&flag_shared, "shared", false, "generate code that can be linked into a shared library")
 		flag.BoolVar(&flag_dynlink, "dynlink", false, "support references to Go symbols defined in other shared libraries")
+		flag.BoolVar(&Ctxt.Flag_linkshared, "linkshared", false, "generate code that will be linked against Go shared libraries")
 	}
 	flag.StringVar(&cpuprofile, "cpuprofile", "", "write cpu profile to `file`")
 	flag.StringVar(&memprofile, "memprofile", "", "write memory profile to `file`")
@@ -263,15 +279,44 @@ func Main(archInit func(*Arch)) {
 	flag.StringVar(&blockprofile, "blockprofile", "", "write block profile to `file`")
 	flag.StringVar(&mutexprofile, "mutexprofile", "", "write mutex profile to `file`")
 	flag.StringVar(&benchfile, "bench", "", "append benchmark times to `file`")
-	flag.BoolVar(&newescape, "newescape", true, "enable new escape analysis")
 	flag.BoolVar(&smallFrames, "smallframes", false, "reduce the size limit for stack allocated objects")
 	flag.BoolVar(&Ctxt.UseBASEntries, "dwarfbasentries", Ctxt.UseBASEntries, "use base address selection entries in DWARF")
+	flag.StringVar(&jsonLogOpt, "json", "", "version,destination for JSON compiler/optimizer logging")
+
 	objabi.Flagparse(usage)
+
+	Ctxt.Pkgpath = myimportpath
+
+	for _, f := range strings.Split(spectre, ",") {
+		f = strings.TrimSpace(f)
+		switch f {
+		default:
+			log.Fatalf("unknown setting -spectre=%s", f)
+		case "":
+			// nothing
+		case "all":
+			spectreIndex = true
+			Ctxt.Retpoline = true
+		case "index":
+			spectreIndex = true
+		case "ret":
+			Ctxt.Retpoline = true
+		}
+	}
+
+	if spectreIndex {
+		switch objabi.GOARCH {
+		case "amd64":
+			// ok
+		default:
+			log.Fatalf("GOARCH=%s does not support -spectre=index", objabi.GOARCH)
+		}
+	}
 
 	// Record flags that affect the build result. (And don't
 	// record flags that don't, since that would cause spurious
 	// changes in the binary.)
-	recordFlags("B", "N", "l", "msan", "race", "shared", "dynlink", "dwarflocationlists", "newescape", "dwarfbasentries", "smallframes")
+	recordFlags("B", "N", "l", "msan", "race", "shared", "dynlink", "dwarflocationlists", "dwarfbasentries", "smallframes", "spectre")
 
 	if smallFrames {
 		maxStackVarSize = 128 * 1024
@@ -335,6 +380,10 @@ func Main(archInit func(*Arch)) {
 
 	if flag_race && flag_msan {
 		log.Fatal("cannot use both -race and -msan")
+	}
+	if flag_race || flag_msan {
+		// -race and -msan imply -d=checkptr for now.
+		Debug_checkptr = 1
 	}
 	if ispkgin(omit_pkgs) {
 		flag_race = false
@@ -436,6 +485,14 @@ func Main(archInit func(*Arch)) {
 		}
 	}
 
+	if compiling_runtime {
+		// Runtime can't use -d=checkptr, at least not yet.
+		Debug_checkptr = 0
+
+		// Fuzzing the runtime isn't interesting either.
+		Debug_libfuzzer = 0
+	}
+
 	// set via a -d flag
 	Ctxt.Debugpcln = Debug_pctab
 	if flagDWARF {
@@ -452,6 +509,10 @@ func Main(archInit func(*Arch)) {
 	//	-l=2, -l=3: inlining on again, with extra debugging (debug['l'] > 1)
 	if Debug['l'] <= 1 {
 		Debug['l'] = 1 - Debug['l']
+	}
+
+	if jsonLogOpt != "" { // parse version,destination from json logging optimization.
+		logopt.LogJsonOption(jsonLogOpt)
 	}
 
 	ssaDump = os.Getenv("GOSSAFUNC")
@@ -481,8 +542,8 @@ func Main(archInit func(*Arch)) {
 	types.Sconv = func(s *types.Sym, flag, mode int) string {
 		return sconv(s, FmtFlag(flag), fmtMode(mode))
 	}
-	types.Tconv = func(t *types.Type, flag, mode, depth int) string {
-		return tconv(t, FmtFlag(flag), fmtMode(mode), depth)
+	types.Tconv = func(t *types.Type, flag, mode int) string {
+		return tconv(t, FmtFlag(flag), fmtMode(mode))
 	}
 	types.FormatSym = func(sym *types.Sym, s fmt.State, verb rune, mode int) {
 		symFormat(sym, s, verb, fmtMode(mode))
@@ -495,7 +556,7 @@ func Main(archInit func(*Arch)) {
 	}
 	types.FmtLeft = int(FmtLeft)
 	types.FmtUnsigned = int(FmtUnsigned)
-	types.FErr = FErr
+	types.FErr = int(FErr)
 	types.Ctxt = Ctxt
 
 	initUniverse()
@@ -528,7 +589,6 @@ func Main(archInit func(*Arch)) {
 	//   We also defer type alias declarations until phase 2
 	//   to avoid cycles like #18640.
 	//   TODO(gri) Remove this again once we have a fix for #25838.
-	defercheckwidth()
 
 	// Don't use range--typecheck can add closures to xtop.
 	timings.Start("fe", "typecheck", "top1")
@@ -550,7 +610,6 @@ func Main(archInit func(*Arch)) {
 			xtop[i] = typecheck(n, ctxStmt)
 		}
 	}
-	resumecheckwidth()
 
 	// Phase 3: Type check function bodies.
 	// Don't use range--typecheck can add closures to xtop.
@@ -573,7 +632,7 @@ func Main(archInit func(*Arch)) {
 			fcount++
 		}
 	}
-	// With all types ckecked, it's now safe to verify map keys. One single
+	// With all types checked, it's now safe to verify map keys. One single
 	// check past phase 9 isn't sufficient, as we may exit with other errors
 	// before then, thus skipping map key errors.
 	checkMapKeys()
@@ -621,8 +680,12 @@ func Main(archInit func(*Arch)) {
 	if Debug['l'] != 0 {
 		// Find functions that can be inlined and clone them before walk expands them.
 		visitBottomUp(xtop, func(list []*Node, recursive bool) {
+			numfns := numNonClosures(list)
 			for _, n := range list {
-				if !recursive {
+				if !recursive || numfns > 1 {
+					// We allow inlining if there is no
+					// recursion, or the recursion cycle is
+					// across more than one function.
 					caninl(n)
 				} else {
 					if Debug['m'] > 1 {
@@ -727,6 +790,8 @@ func Main(archInit func(*Arch)) {
 
 	// Write object data to disk.
 	timings.Start("be", "dumpobj")
+	dumpdata()
+	Ctxt.NumberSyms()
 	dumpobj()
 	if asmhdr != "" {
 		dumpasmhdr()
@@ -748,6 +813,8 @@ func Main(archInit func(*Arch)) {
 		Fatalf("%d uncompiled functions", len(compilequeue))
 	}
 
+	logopt.FlushLoggedOpts(Ctxt, myimportpath)
+
 	if nerrors+nsavederrors != 0 {
 		errorexit()
 	}
@@ -760,6 +827,17 @@ func Main(archInit func(*Arch)) {
 			log.Fatalf("cannot write benchmark data: %v", err)
 		}
 	}
+}
+
+// numNonClosures returns the number of functions in list which are not closures.
+func numNonClosures(list []*Node) int {
+	count := 0
+	for _, n := range list {
+		if n.Func.Closure == nil {
+			count++
+		}
+	}
+	return count
 }
 
 func writebench(filename string) error {
@@ -1036,10 +1114,9 @@ func loadsys() {
 
 	inimport = true
 	typecheckok = true
-	defercheckwidth()
 
 	typs := runtimeTypes()
-	for _, d := range runtimeDecls {
+	for _, d := range &runtimeDecls {
 		sym := Runtimepkg.Lookup(d.name)
 		typ := typs[d.typ]
 		switch d.tag {
@@ -1053,7 +1130,6 @@ func loadsys() {
 	}
 
 	typecheckok = false
-	resumecheckwidth()
 	inimport = false
 }
 
@@ -1180,15 +1256,6 @@ func importfile(f *Val) *types.Pkg {
 		}
 	}
 
-	// assume files move (get installed) so don't record the full path
-	if packageFile != nil {
-		// If using a packageFile map, assume path_ can be recorded directly.
-		Ctxt.AddImport(path_)
-	} else {
-		// For file "/Users/foo/go/pkg/darwin_amd64/math.a" record "math.a".
-		Ctxt.AddImport(file[len(file)-len(path_)-len(".a"):])
-	}
-
 	// In the importfile, if we find:
 	// $$\n  (textual format): not supported anymore
 	// $$B\n (binary format) : import directly, then feed the lexer a dummy statement
@@ -1213,6 +1280,7 @@ func importfile(f *Val) *types.Pkg {
 		c, _ = imp.ReadByte()
 	}
 
+	var fingerprint goobj.FingerprintType
 	switch c {
 	case '\n':
 		yyerror("cannot import %s: old export format no longer supported (recompile library)", path_)
@@ -1236,11 +1304,20 @@ func importfile(f *Val) *types.Pkg {
 			yyerror("import %s: unexpected package format byte: %v", file, c)
 			errorexit()
 		}
-		iimport(importpkg, imp)
+		fingerprint = iimport(importpkg, imp)
 
 	default:
 		yyerror("no import in %q", path_)
 		errorexit()
+	}
+
+	// assume files move (get installed) so don't record the full path
+	if packageFile != nil {
+		// If using a packageFile map, assume path_ can be recorded directly.
+		Ctxt.AddImport(path_, fingerprint)
+	} else {
+		// For file "/Users/foo/go/pkg/darwin_amd64/math.a" record "math.a".
+		Ctxt.AddImport(file[len(file)-len(path_)-len(".a"):], fingerprint)
 	}
 
 	if importpkg.Height >= myheight {
@@ -1343,7 +1420,7 @@ var concurrentFlagOK = [256]bool{
 }
 
 func concurrentBackendAllowed() bool {
-	for i, x := range Debug {
+	for i, x := range &Debug {
 		if x != 0 && !concurrentFlagOK[i] {
 			return false
 		}
@@ -1413,7 +1490,7 @@ func recordFlags(flags ...string) {
 		return
 	}
 	s := Ctxt.Lookup(dwarf.CUInfoPrefix + "producer." + myimportpath)
-	s.Type = objabi.SDWARFINFO
+	s.Type = objabi.SDWARFCUINFO
 	// Sometimes (for example when building tests) we can link
 	// together two package main archives. So allow dups.
 	s.Set(obj.AttrDuplicateOK, true)
@@ -1425,7 +1502,7 @@ func recordFlags(flags ...string) {
 // compiled, so that the linker can save it in the compile unit's DIE.
 func recordPackageName() {
 	s := Ctxt.Lookup(dwarf.CUInfoPrefix + "packagename." + myimportpath)
-	s.Type = objabi.SDWARFINFO
+	s.Type = objabi.SDWARFCUINFO
 	// Sometimes (for example when building tests) we can link
 	// together two package main archives. So allow dups.
 	s.Set(obj.AttrDuplicateOK, true)
@@ -1455,8 +1532,18 @@ type lang struct {
 // any language version is supported.
 var langWant lang
 
-// langSupported reports whether language version major.minor is supported.
-func langSupported(major, minor int) bool {
+// langSupported reports whether language version major.minor is
+// supported in a particular package.
+func langSupported(major, minor int, pkg *types.Pkg) bool {
+	if pkg == nil {
+		// TODO(mdempsky): Set Pkg for local types earlier.
+		pkg = localpkg
+	}
+	if pkg != localpkg {
+		// Assume imported packages passed type-checking.
+		return true
+	}
+
 	if langWant.major == 0 && langWant.minor == 0 {
 		return true
 	}

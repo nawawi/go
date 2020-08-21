@@ -5,6 +5,7 @@
 package runtime
 
 import (
+	"runtime/internal/atomic"
 	"runtime/internal/sys"
 	"unsafe"
 )
@@ -115,6 +116,13 @@ const (
 	_CLONE_STOPPED        = 0x2000000
 	_CLONE_NEWUTS         = 0x4000000
 	_CLONE_NEWIPC         = 0x8000000
+
+	// As of QEMU 2.8.0 (5ea2fc84d), user emulation requires all six of these
+	// flags to be set when creating a thread; attempts to share the other
+	// five but leave SYSVSEM unshared will fail with -EINVAL.
+	//
+	// In non-QEMU environments CLONE_SYSVSEM is inconsequential as we do not
+	// use System V semaphores.
 
 	cloneFlags = _CLONE_VM | /* share memory */
 		_CLONE_FS | /* share cwd, etc */
@@ -241,6 +249,10 @@ func sysargs(argc int32, argv **byte) {
 	sysauxv(buf[:])
 }
 
+// startupRandomData holds random bytes initialized at startup. These come from
+// the ELF AT_RANDOM auxiliary vector.
+var startupRandomData []byte
+
 func sysauxv(auxv []uintptr) int {
 	var i int
 	for ; auxv[i] != _AT_NULL; i += 2 {
@@ -269,13 +281,14 @@ func getHugePageSize() uintptr {
 	if fd < 0 {
 		return 0
 	}
-	n := read(fd, noescape(unsafe.Pointer(&numbuf[0])), int32(len(numbuf)))
+	ptr := noescape(unsafe.Pointer(&numbuf[0]))
+	n := read(fd, ptr, int32(len(numbuf)))
 	closefd(fd)
 	if n <= 0 {
 		return 0
 	}
-	l := n - 1 // remove trailing newline
-	v, ok := atoi(slicebytetostringtmp(numbuf[:l]))
+	n-- // remove trailing newline
+	v, ok := atoi(slicebytetostringtmp((*byte)(ptr), int(n)))
 	if !ok || v < 0 {
 		v = 0
 	}
@@ -289,6 +302,7 @@ func getHugePageSize() uintptr {
 func osinit() {
 	ncpu = getproccount()
 	physHugePageSize = getHugePageSize()
+	osArchInit()
 }
 
 var urandom_dev = []byte("/dev/urandom\x00")
@@ -332,7 +346,9 @@ func gettid() uint32
 func minit() {
 	minitSignals()
 
-	// for debuggers, in case cgo created the thread
+	// Cgo-created threads and the bootstrap m are missing a
+	// procid. We need this for asynchronous preemption and it's
+	// useful in debuggers.
 	getg().m.procid = uint64(gettid())
 }
 
@@ -371,6 +387,10 @@ func raiseproc(sig uint32)
 //go:noescape
 func sched_getaffinity(pid, len uintptr, buf *byte) int32
 func osyield()
+
+func pipe() (r, w int32, errno int32)
+func pipe2(flags int32) (r, w int32, errno int32)
+func setNonblock(fd int32)
 
 //go:nosplit
 //go:nowritebarrierrec
@@ -452,3 +472,25 @@ func sysSigaction(sig uint32, new, old *sigactiont) {
 // rt_sigaction is implemented in assembly.
 //go:noescape
 func rt_sigaction(sig uintptr, new, old *sigactiont, size uintptr) int32
+
+func getpid() int
+func tgkill(tgid, tid, sig int)
+
+// touchStackBeforeSignal stores an errno value. If non-zero, it means
+// that we should touch the signal stack before sending a signal.
+// This is used on systems that have a bug when the signal stack must
+// be faulted in.  See #35777 and #37436.
+//
+// This is accessed atomically as it is set and read in different threads.
+//
+// TODO(austin): Remove this after Go 1.15 when we remove the
+// mlockGsignal workaround.
+var touchStackBeforeSignal uint32
+
+// signalM sends a signal to mp.
+func signalM(mp *m, sig int) {
+	if atomic.Load(&touchStackBeforeSignal) != 0 {
+		atomic.Cas((*uint32)(unsafe.Pointer(mp.gsignal.stack.hi-4)), 0, 0)
+	}
+	tgkill(getpid(), int(mp.procid), sig)
+}

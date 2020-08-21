@@ -22,7 +22,7 @@ var ErrSyntax = errors.New("invalid syntax")
 
 // A NumError records a failed conversion.
 type NumError struct {
-	Func string // the failing function (ParseBool, ParseInt, ParseUint, ParseFloat)
+	Func string // the failing function (ParseBool, ParseInt, ParseUint, ParseFloat, ParseComplex)
 	Num  string // the input
 	Err  error  // the reason the conversion failed (e.g. ErrRange, ErrSyntax, etc.)
 }
@@ -30,6 +30,8 @@ type NumError struct {
 func (e *NumError) Error() string {
 	return "strconv." + e.Func + ": " + "parsing " + Quote(e.Num) + ": " + e.Err.Error()
 }
+
+func (e *NumError) Unwrap() error { return e.Err }
 
 func syntaxError(fn, str string) *NumError {
 	return &NumError{fn, str, ErrSyntax}
@@ -58,7 +60,7 @@ const maxUint64 = 1<<64 - 1
 func ParseUint(s string, base int, bitSize int) (uint64, error) {
 	const fnParseUint = "ParseUint"
 
-	if s == "" || !underscoreOK(s) {
+	if s == "" {
 		return 0, syntaxError(fnParseUint, s)
 	}
 
@@ -94,7 +96,7 @@ func ParseUint(s string, base int, bitSize int) (uint64, error) {
 	}
 
 	if bitSize == 0 {
-		bitSize = int(IntSize)
+		bitSize = IntSize
 	} else if bitSize < 0 || bitSize > 64 {
 		return 0, bitSizeError(fnParseUint, s0, bitSize)
 	}
@@ -113,12 +115,13 @@ func ParseUint(s string, base int, bitSize int) (uint64, error) {
 
 	maxVal := uint64(1)<<uint(bitSize) - 1
 
+	underscores := false
 	var n uint64
 	for _, c := range []byte(s) {
 		var d byte
 		switch {
 		case c == '_' && base0:
-			// underscoreOK already called
+			underscores = true
 			continue
 		case '0' <= c && c <= '9':
 			d = c - '0'
@@ -144,6 +147,10 @@ func ParseUint(s string, base int, bitSize int) (uint64, error) {
 			return maxVal, rangeError(fnParseUint, s0)
 		}
 		n = n1
+	}
+
+	if underscores && !underscoreOK(s0) {
+		return 0, syntaxError(fnParseUint, s0)
 	}
 
 	return n, nil
@@ -196,7 +203,7 @@ func ParseInt(s string, base int, bitSize int) (i int64, err error) {
 	}
 
 	if bitSize == 0 {
-		bitSize = int(IntSize)
+		bitSize = IntSize
 	}
 
 	cutoff := uint64(1 << uint(bitSize-1))

@@ -1,4 +1,4 @@
-// errorcheck -0 -m -l -newescape=true
+// errorcheck -0 -m -l
 
 // Copyright 2012 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
@@ -139,7 +139,7 @@ func f8(p *T1) (k T2) { // ERROR "leaking param: p$"
 	}
 
 	// should make p leak always
-	global = p // ERROR "p escapes to heap"
+	global = p
 	return T2{p}
 }
 
@@ -164,7 +164,7 @@ func f13() {
 	var x *int
 	f11(&x)
 	f12(&x)
-	runtime.KeepAlive(&x) // ERROR "&x does not escape"
+	runtime.KeepAlive(&x)
 }
 
 // Test for issue 24305 (passing to unnamed receivers does not escape).
@@ -177,6 +177,13 @@ func _() {
 	var u U
 	u.M()
 	u.N()
+}
+
+func fbad24305() {
+	// BAD u should not be heap allocated
+	var u U // ERROR "moved to heap: u"
+	(*U).M(&u)
+	(*U).N(&u)
 }
 
 // Issue 24730: taking address in a loop causes unnecessary escape

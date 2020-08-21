@@ -5,14 +5,9 @@
 package obj
 
 import (
-	"cmd/internal/src"
+	"cmd/internal/goobj"
 	"encoding/binary"
 	"log"
-)
-
-const (
-	PrologueEnd   = 2 + iota // overload "is_stmt" to include prologue_end
-	EpilogueBegin            // overload "is_stmt" to include epilogue_end
 )
 
 // funcpctab writes to dst a pc-value table mapping the code in func to the values
@@ -136,28 +131,13 @@ func pctofileline(ctxt *Link, sym *LSym, oldval int32, p *Prog, phase int32, arg
 	if p.As == ATEXT || p.As == ANOP || p.Pos.Line() == 0 || phase == 1 {
 		return oldval
 	}
-	f, l := linkgetlineFromPos(ctxt, p.Pos)
+	f, l := getFileIndexAndLine(ctxt, p.Pos)
 	if arg == nil {
 		return l
 	}
 	pcln := arg.(*Pcln)
-
-	if f == pcln.Lastfile {
-		return int32(pcln.Lastindex)
-	}
-
-	for i, file := range pcln.File {
-		if file == f {
-			pcln.Lastfile = f
-			pcln.Lastindex = i
-			return int32(i)
-		}
-	}
-	i := len(pcln.File)
-	pcln.File = append(pcln.File, f)
-	pcln.Lastfile = f
-	pcln.Lastindex = i
-	return int32(i)
+	pcln.UsedFiles[goobj.CUFileIndex(f)] = struct{}{}
+	return int32(f)
 }
 
 // pcinlineState holds the state used to create a function's inlining
@@ -249,34 +229,6 @@ func pctospadj(ctxt *Link, sym *LSym, oldval int32, p *Prog, phase int32, arg in
 	return oldval + p.Spadj
 }
 
-// pctostmt returns either,
-// if phase==0, then whether the current instruction is a step-target (Dwarf is_stmt)
-//     bit-or'd with whether the current statement is a prologue end or epilogue begin
-// else (phase == 1), zero.
-//
-func pctostmt(ctxt *Link, sym *LSym, oldval int32, p *Prog, phase int32, arg interface{}) int32 {
-	if phase == 1 {
-		return 0 // Ignored; also different from initial value of -1, if that ever matters.
-	}
-	s := p.Pos.IsStmt()
-	l := p.Pos.Xlogue()
-
-	var is_stmt int32
-
-	// PrologueEnd, at least, is passed to the next instruction
-	switch l {
-	case src.PosPrologueEnd:
-		is_stmt = PrologueEnd
-	case src.PosEpilogueBegin:
-		is_stmt = EpilogueBegin
-	}
-
-	if s != src.PosNotStmt {
-		is_stmt |= 1 // either PosDefaultStmt from asm, or PosIsStmt from go
-	}
-	return is_stmt
-}
-
 // pctopcdata computes the pcdata value in effect at p.
 // A PCDATA instruction sets the value in effect at future
 // non-PCDATA instructions.
@@ -295,15 +247,9 @@ func pctopcdata(ctxt *Link, sym *LSym, oldval int32, p *Prog, phase int32, arg i
 	return int32(p.To.Offset)
 }
 
-// stmtData writes out pc-linked is_stmt data for eventual use in the DWARF line numbering table.
-func stmtData(ctxt *Link, cursym *LSym) {
-	var pctostmtData Pcdata
-	funcpctab(ctxt, &pctostmtData, cursym, "pctostmt", pctostmt, nil)
-	cursym.Func.dwarfIsStmtSym.P = pctostmtData.P
-}
-
 func linkpcln(ctxt *Link, cursym *LSym) {
 	pcln := &cursym.Func.Pcln
+	pcln.UsedFiles = make(map[goobj.CUFileIndex]struct{})
 
 	npcdata := 0
 	nfuncdata := 0
@@ -331,6 +277,21 @@ func linkpcln(ctxt *Link, cursym *LSym) {
 	funcpctab(ctxt, &pcln.Pcsp, cursym, "pctospadj", pctospadj, nil)
 	funcpctab(ctxt, &pcln.Pcfile, cursym, "pctofile", pctofileline, pcln)
 	funcpctab(ctxt, &pcln.Pcline, cursym, "pctoline", pctofileline, nil)
+
+	// Check that all the Progs used as inline markers are still reachable.
+	// See issue #40473.
+	inlMarkProgs := make(map[*Prog]struct{}, len(cursym.Func.InlMarks))
+	for _, inlMark := range cursym.Func.InlMarks {
+		inlMarkProgs[inlMark.p] = struct{}{}
+	}
+	for p := cursym.Func.Text; p != nil; p = p.Link {
+		if _, ok := inlMarkProgs[p]; ok {
+			delete(inlMarkProgs, p)
+		}
+	}
+	if len(inlMarkProgs) > 0 {
+		ctxt.Diag("one or more instructions used as inline markers are no longer reachable")
+	}
 
 	pcinlineState := new(pcinlineState)
 	funcpctab(ctxt, &pcln.Pcinline, cursym, "pctoinline", pcinlineState.pctoinline, nil)
@@ -383,4 +344,70 @@ func linkpcln(ctxt *Link, cursym *LSym) {
 			}
 		}
 	}
+}
+
+// PCIter iterates over encoded pcdata tables.
+type PCIter struct {
+	p       []byte
+	PC      uint32
+	NextPC  uint32
+	PCScale uint32
+	Value   int32
+	start   bool
+	Done    bool
+}
+
+// newPCIter creates a PCIter with a scale factor for the PC step size.
+func NewPCIter(pcScale uint32) *PCIter {
+	it := new(PCIter)
+	it.PCScale = pcScale
+	return it
+}
+
+// Next advances it to the Next pc.
+func (it *PCIter) Next() {
+	it.PC = it.NextPC
+	if it.Done {
+		return
+	}
+	if len(it.p) == 0 {
+		it.Done = true
+		return
+	}
+
+	// Value delta
+	val, n := binary.Varint(it.p)
+	if n <= 0 {
+		log.Fatalf("bad Value varint in pciterNext: read %v", n)
+	}
+	it.p = it.p[n:]
+
+	if val == 0 && !it.start {
+		it.Done = true
+		return
+	}
+
+	it.start = false
+	it.Value += int32(val)
+
+	// pc delta
+	pc, n := binary.Uvarint(it.p)
+	if n <= 0 {
+		log.Fatalf("bad pc varint in pciterNext: read %v", n)
+	}
+	it.p = it.p[n:]
+
+	it.NextPC = it.PC + uint32(pc)*it.PCScale
+}
+
+// init prepares it to iterate over p,
+// and advances it to the first pc.
+func (it *PCIter) Init(p []byte) {
+	it.p = p
+	it.PC = 0
+	it.NextPC = 0
+	it.Value = -1
+	it.start = true
+	it.Done = false
+	it.Next()
 }

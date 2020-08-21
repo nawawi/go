@@ -5,6 +5,7 @@
 package modload
 
 import (
+	"context"
 	"internal/testenv"
 	"io/ioutil"
 	"log"
@@ -15,9 +16,8 @@ import (
 	"testing"
 
 	"cmd/go/internal/cfg"
-	"cmd/go/internal/modfetch"
-	"cmd/go/internal/modfetch/codehost"
-	"cmd/go/internal/module"
+
+	"golang.org/x/mod/module"
 )
 
 func TestMain(m *testing.M) {
@@ -35,8 +35,7 @@ func testMain(m *testing.M) int {
 
 	os.Setenv("GOPATH", dir)
 	cfg.BuildContext.GOPATH = dir
-	modfetch.PkgMod = filepath.Join(dir, "pkg/mod")
-	codehost.WorkRoot = filepath.Join(dir, "codework")
+	cfg.GOMODCACHE = filepath.Join(dir, "pkg/mod")
 	return m.Run()
 }
 
@@ -63,7 +62,7 @@ var queryTests = []struct {
 		git add go.mod
 		git commit -m v1 go.mod
 		git tag start
-		for i in v0.0.0-pre1 v0.0.0 v0.0.1 v0.0.2 v0.0.3 v0.1.0 v0.1.1 v0.1.2 v0.3.0 v1.0.0 v1.1.0 v1.9.0 v1.9.9 v1.9.10-pre1 v1.9.10-pre2+metadata; do
+		for i in v0.0.0-pre1 v0.0.0 v0.0.1 v0.0.2 v0.0.3 v0.1.0 v0.1.1 v0.1.2 v0.3.0 v1.0.0 v1.1.0 v1.9.0 v1.9.9 v1.9.10-pre1 v1.9.10-pre2+metadata unversioned; do
 			echo before $i >status
 			git add status
 			git commit -m "before $i" status
@@ -106,6 +105,7 @@ var queryTests = []struct {
 	{path: queryRepo, query: "v0.2", err: `no matching versions for query "v0.2"`},
 	{path: queryRepo, query: "v0.0", vers: "v0.0.3"},
 	{path: queryRepo, query: "v1.9.10-pre2+metadata", vers: "v1.9.10-pre2.0.20190513201126-42abcb6df8ee"},
+	{path: queryRepo, query: "ed5ffdaa", vers: "v1.9.10-pre2.0.20191220134614-ed5ffdaa1f5e"},
 
 	// golang.org/issue/29262: The major version for for a module without a suffix
 	// should be based on the most recent tag (v1 as appropriate, not v0
@@ -161,10 +161,14 @@ var queryTests = []struct {
 	{path: queryRepoV2, query: "v2.6.0-pre1", vers: "v2.6.0-pre1"},
 	{path: queryRepoV2, query: "latest", vers: "v2.5.5"},
 
-	// e0cf3de987e6 is the latest commit on the master branch, and it's actually
-	// v1.19.10-pre1, not anything resembling v3: attempting to query it as such
-	// should fail.
+	// Commit e0cf3de987e6 is actually v1.19.10-pre1, not anything resembling v3,
+	// and it has a go.mod file with a non-v3 module path. Attempting to query it
+	// as the v3 module should fail.
 	{path: queryRepoV3, query: "e0cf3de987e6", err: `vcs-test.golang.org/git/querytest.git/v3@v3.0.0-20180704024501-e0cf3de987e6: invalid version: go.mod has non-.../v3 module path "vcs-test.golang.org/git/querytest.git" (and .../v3/go.mod does not exist) at revision e0cf3de987e6`},
+
+	// The querytest repo does not have any commits tagged with major version 3,
+	// and the latest commit in the repo has a go.mod file specifying a non-v3 path.
+	// That should prevent us from resolving any version for the /v3 path.
 	{path: queryRepoV3, query: "latest", err: `no matching versions for query "latest"`},
 
 	{path: emptyRepo, query: "latest", vers: "v0.0.0-20180704023549-7bb914627242"},
@@ -175,6 +179,8 @@ var queryTests = []struct {
 func TestQuery(t *testing.T) {
 	testenv.MustHaveExternalNetwork(t)
 	testenv.MustHaveExecPath(t, "git")
+
+	ctx := context.Background()
 
 	for _, tt := range queryTests {
 		allow := tt.allow
@@ -189,7 +195,7 @@ func TestQuery(t *testing.T) {
 		t.Run(strings.ReplaceAll(tt.path, "/", "_")+"/"+tt.query+"/"+tt.current+"/"+allow, func(t *testing.T) {
 			t.Parallel()
 
-			info, err := Query(tt.path, tt.query, tt.current, allowed)
+			info, err := Query(ctx, tt.path, tt.query, tt.current, allowed)
 			if tt.err != "" {
 				if err == nil {
 					t.Errorf("Query(%q, %q, %v) = %v, want error %q", tt.path, tt.query, allow, info.Version, tt.err)
