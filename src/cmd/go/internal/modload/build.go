@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"internal/goroot"
 	"os"
@@ -49,7 +50,7 @@ func findStandardImportPath(path string) string {
 // PackageModuleInfo returns information about the module that provides
 // a given package. If modules are not enabled or if the package is in the
 // standard library or if the package was not successfully loaded with
-// ImportPaths or a similar loading function, nil is returned.
+// LoadPackages or ImportFromFiles, nil is returned.
 func PackageModuleInfo(pkgpath string) *modinfo.ModulePublic {
 	if isStandardImportPath(pkgpath) || !Enabled() {
 		return nil
@@ -58,7 +59,9 @@ func PackageModuleInfo(pkgpath string) *modinfo.ModulePublic {
 	if !ok {
 		return nil
 	}
-	return moduleInfo(context.TODO(), m, true)
+	fromBuildList := true
+	listRetracted := false
+	return moduleInfo(context.TODO(), m, fromBuildList, listRetracted)
 }
 
 func ModuleInfo(ctx context.Context, path string) *modinfo.ModulePublic {
@@ -66,13 +69,17 @@ func ModuleInfo(ctx context.Context, path string) *modinfo.ModulePublic {
 		return nil
 	}
 
+	listRetracted := false
 	if i := strings.Index(path, "@"); i >= 0 {
-		return moduleInfo(ctx, module.Version{Path: path[:i], Version: path[i+1:]}, false)
+		m := module.Version{Path: path[:i], Version: path[i+1:]}
+		fromBuildList := false
+		return moduleInfo(ctx, m, fromBuildList, listRetracted)
 	}
 
-	for _, m := range BuildList() {
+	for _, m := range LoadedModules() {
 		if m.Path == path {
-			return moduleInfo(ctx, m, true)
+			fromBuildList := true
+			return moduleInfo(ctx, m, fromBuildList, listRetracted)
 		}
 	}
 
@@ -90,7 +97,7 @@ func addUpdate(ctx context.Context, m *modinfo.ModulePublic) {
 		return
 	}
 
-	if info, err := Query(ctx, m.Path, "upgrade", m.Version, Allowed); err == nil && semver.Compare(info.Version, m.Version) > 0 {
+	if info, err := Query(ctx, m.Path, "upgrade", m.Version, CheckAllowed); err == nil && semver.Compare(info.Version, m.Version) > 0 {
 		m.Update = &modinfo.ModulePublic{
 			Path:    m.Path,
 			Version: info.Version,
@@ -100,11 +107,37 @@ func addUpdate(ctx context.Context, m *modinfo.ModulePublic) {
 }
 
 // addVersions fills in m.Versions with the list of known versions.
-func addVersions(m *modinfo.ModulePublic) {
-	m.Versions, _ = versions(m.Path)
+// Excluded versions will be omitted. If listRetracted is false, retracted
+// versions will also be omitted.
+func addVersions(ctx context.Context, m *modinfo.ModulePublic, listRetracted bool) {
+	allowed := CheckAllowed
+	if listRetracted {
+		allowed = CheckExclusions
+	}
+	m.Versions, _ = versions(ctx, m.Path, allowed)
 }
 
-func moduleInfo(ctx context.Context, m module.Version, fromBuildList bool) *modinfo.ModulePublic {
+// addRetraction fills in m.Retracted if the module was retracted by its author.
+// m.Error is set if there's an error loading retraction information.
+func addRetraction(ctx context.Context, m *modinfo.ModulePublic) {
+	if m.Version == "" {
+		return
+	}
+
+	err := checkRetractions(ctx, module.Version{Path: m.Path, Version: m.Version})
+	var rerr *retractedError
+	if errors.As(err, &rerr) {
+		if len(rerr.rationale) == 0 {
+			m.Retracted = []string{"retracted by module author"}
+		} else {
+			m.Retracted = rerr.rationale
+		}
+	} else if err != nil && m.Error == nil {
+		m.Error = &modinfo.ModuleError{Err: err.Error()}
+	}
+}
+
+func moduleInfo(ctx context.Context, m module.Version, fromBuildList, listRetracted bool) *modinfo.ModulePublic {
 	if m == Target {
 		info := &modinfo.ModulePublic{
 			Path:    m.Path,
@@ -151,6 +184,10 @@ func moduleInfo(ctx context.Context, m module.Version, fromBuildList bool) *modi
 			dir, err := modfetch.DownloadDir(mod)
 			if err == nil {
 				m.Dir = dir
+			}
+
+			if listRetracted {
+				addRetraction(ctx, m)
 			}
 		}
 
@@ -205,6 +242,7 @@ func moduleInfo(ctx context.Context, m module.Version, fromBuildList bool) *modi
 		completeFromModCache(info.Replace)
 		info.Dir = info.Replace.Dir
 		info.GoMod = info.Replace.GoMod
+		info.Retracted = info.Replace.Retracted
 	}
 	info.GoVersion = info.Replace.GoVersion
 	return info
@@ -212,8 +250,7 @@ func moduleInfo(ctx context.Context, m module.Version, fromBuildList bool) *modi
 
 // PackageBuildInfo returns a string containing module version information
 // for modules providing packages named by path and deps. path and deps must
-// name packages that were resolved successfully with ImportPaths or one of
-// the Load functions.
+// name packages that were resolved successfully with LoadPackages.
 func PackageBuildInfo(path string, deps []string) string {
 	if isStandardImportPath(path) || !Enabled() {
 		return ""
@@ -283,9 +320,8 @@ func mustFindModule(target, path string) module.Version {
 }
 
 // findModule searches for the module that contains the package at path.
-// If the package was loaded with ImportPaths or one of the other loading
-// functions, its containing module and true are returned. Otherwise,
-// module.Version{} and false are returend.
+// If the package was loaded, its containing module and true are returned.
+// Otherwise, module.Version{} and false are returend.
 func findModule(path string) (module.Version, bool) {
 	if pkg, ok := loaded.pkgCache.Get(path).(*loadPkg); ok {
 		return pkg.mod, pkg.mod != module.Version{}
@@ -317,13 +353,13 @@ func ModInfoProg(info string, isgccgo bool) []byte {
 import _ "unsafe"
 //go:linkname __debug_modinfo__ runtime.modinfo
 var __debug_modinfo__ = %q
-	`, string(infoStart)+info+string(infoEnd)))
+`, string(infoStart)+info+string(infoEnd)))
 	} else {
 		return []byte(fmt.Sprintf(`package main
 import _ "unsafe"
 //go:linkname __set_debug_modinfo__ runtime.setmodinfo
 func __set_debug_modinfo__(string)
 func init() { __set_debug_modinfo__(%q) }
-	`, string(infoStart)+info+string(infoEnd)))
+`, string(infoStart)+info+string(infoEnd)))
 	}
 }
