@@ -49,15 +49,6 @@ func LoadAllModules(ctx context.Context) []module.Version {
 	return capVersionSlice(buildList)
 }
 
-// LoadedModules returns the list of module requirements loaded or set by a
-// previous call (typically LoadAllModules or LoadPackages), starting with the
-// Target module and in a deterministic (stable) order.
-//
-// The caller must not modify the returned list, but may append to it.
-func LoadedModules() []module.Version {
-	return capVersionSlice(buildList)
-}
-
 // Selected returns the selected version of the module with the given path, or
 // the empty string if the given module has no selected version
 // (either because it is not required or because it is the Target module).
@@ -73,13 +64,6 @@ func Selected(path string) (version string) {
 	return ""
 }
 
-// SetBuildList sets the module build list.
-// The caller is responsible for ensuring that the list is valid.
-// SetBuildList does not retain a reference to the original list.
-func SetBuildList(list []module.Version) {
-	buildList = append([]module.Version{}, list...)
-}
-
 // EditBuildList edits the global build list by first adding every module in add
 // to the existing build list, then adjusting versions (and adding or removing
 // requirements as needed) until every module in mustSelect is selected at the
@@ -88,9 +72,6 @@ func SetBuildList(list []module.Version) {
 // (Note that the newly-added modules might not be selected in the resulting
 // build list: they could be lower than existing requirements or conflict with
 // versions in mustSelect.)
-//
-// After performing the requested edits, EditBuildList returns the updated build
-// list.
 //
 // If the versions listed in mustSelect are mutually incompatible (due to one of
 // the listed modules requiring a higher version of another), EditBuildList
@@ -222,7 +203,7 @@ type Conflict struct {
 }
 
 // ReloadBuildList resets the state of loaded packages, then loads and returns
-// the build list set in SetBuildList.
+// the build list set by EditBuildList.
 func ReloadBuildList() []module.Version {
 	loaded = loadFromRoots(loaderParams{
 		PackageOpts: PackageOpts{

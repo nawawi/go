@@ -10,6 +10,8 @@
 #include "go_tls.h"
 #include "textflag.h"
 
+#define CLOCK_REALTIME		0
+
 TEXT notok<>(SB),NOSPLIT,$0
 	MOVD	$0, R8
 	MOVD	R8, (R8)
@@ -118,6 +120,12 @@ TEXT runtime·madvise_trampoline(SB),NOSPLIT,$0
 	BL	libc_madvise(SB)
 	RET
 
+TEXT runtime·mlock_trampoline(SB),NOSPLIT,$0
+	MOVD	8(R0), R1	// arg 2 len
+	MOVD	0(R0), R0	// arg 1 addr
+	BL	libc_mlock(SB)
+	RET
+
 TEXT runtime·setitimer_trampoline(SB),NOSPLIT,$0
 	MOVD	8(R0), R1	// arg 2 new
 	MOVD	16(R0), R2	// arg 3 old
@@ -126,9 +134,9 @@ TEXT runtime·setitimer_trampoline(SB),NOSPLIT,$0
 	RET
 
 TEXT runtime·walltime_trampoline(SB),NOSPLIT,$0
-	// R0 already has *timeval
-	MOVD	$0, R1 // no timezone needed
-	BL	libc_gettimeofday(SB)
+	MOVD	R0, R1			// arg 2 timespec
+	MOVW	$CLOCK_REALTIME, R0 	// arg 1 clock_id
+	BL	libc_clock_gettime(SB)
 	RET
 
 GLOBL timebase<>(SB),NOPTR,$(machTimebaseInfo__size)

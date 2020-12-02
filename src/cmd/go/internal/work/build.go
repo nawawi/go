@@ -267,6 +267,11 @@ func AddBuildFlags(cmd *base.Command, mask BuildFlagMask) {
 	}
 	if mask&OmitModCommonFlags == 0 {
 		base.AddModCommonFlags(&cmd.Flag)
+	} else {
+		// Add the overlay flag even when we don't add the rest of the mod common flags.
+		// This only affects 'go get' in GOPATH mode, but add the flag anyway for
+		// consistency.
+		cmd.Flag.StringVar(&fsys.OverlayFile, "overlay", "", "")
 	}
 	cmd.Flag.StringVar(&cfg.BuildContext.InstallSuffix, "installsuffix", "", "")
 	cmd.Flag.Var(&load.BuildLdflags, "ldflags", "")
@@ -278,8 +283,6 @@ func AddBuildFlags(cmd *base.Command, mask BuildFlagMask) {
 	cmd.Flag.Var((*base.StringsFlag)(&cfg.BuildToolexec), "toolexec", "")
 	cmd.Flag.BoolVar(&cfg.BuildTrimpath, "trimpath", false, "")
 	cmd.Flag.BoolVar(&cfg.BuildWork, "work", false, "")
-
-	cmd.Flag.StringVar(&fsys.OverlayFile, "overlay", "", "")
 
 	// Undocumented, unstable debugging flags.
 	cmd.Flag.StringVar(&cfg.DebugActiongraph, "debug-actiongraph", "", "")
@@ -765,7 +768,8 @@ func installOutsideModule(ctx context.Context, args []string) {
 		// Don't check for retractions if a specific revision is requested.
 		allowed = nil
 	}
-	qrs, err := modload.QueryPackages(ctx, patterns[0], version, modload.Selected, allowed)
+	noneSelected := func(path string) (version string) { return "none" }
+	qrs, err := modload.QueryPackages(ctx, patterns[0], version, noneSelected, allowed)
 	if err != nil {
 		base.Fatalf("go install %s: %v", args[0], err)
 	}
@@ -789,10 +793,12 @@ func installOutsideModule(ctx context.Context, args []string) {
 		base.Fatalf(directiveFmt, args[0], installMod, "exclude")
 	}
 
-	// Initialize the build list using a dummy main module that requires the
-	// module providing the packages on the command line.
-	target := module.Version{Path: "go-install-target"}
-	modload.SetBuildList([]module.Version{target, installMod})
+	// Since we are in NoRoot mode, the build list initially contains only
+	// the dummy command-line-arguments module. Add a requirement on the
+	// module that provides the packages named on the command line.
+	if err := modload.EditBuildList(ctx, nil, []module.Version{installMod}); err != nil {
+		base.Fatalf("go install %s: %v", args[0], err)
+	}
 
 	// Load packages for all arguments. Ignore non-main packages.
 	// Print a warning if an argument contains "..." and matches no main packages.
@@ -837,11 +843,6 @@ func installOutsideModule(ctx context.Context, args []string) {
 	}
 
 	// Check that named packages are all provided by the same module.
-	for _, mod := range modload.LoadedModules() {
-		if mod.Path == installMod.Path && mod.Version != installMod.Version {
-			base.Fatalf("go install: %s: module requires a higher version of itself (%s)", installMod, mod.Version)
-		}
-	}
 	for _, pkg := range mainPkgs {
 		if pkg.Module == nil {
 			// Packages in std, cmd, and their vendored dependencies
