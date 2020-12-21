@@ -12,6 +12,11 @@
 // wasm does not work, because the linear memory is not executable.
 // +build !wasm
 
+// This test doesn't work on gccgo/GoLLVM, because they will not find
+// any unwind information for the artificial function, and will not be
+// able to unwind past that point.
+// +build !gccgo
+
 package main
 
 import (
@@ -22,6 +27,13 @@ import (
 )
 
 func main() {
+	// This test is currently failing on some architectures.
+	// See issue #43283.
+	switch runtime.GOARCH {
+	case "ppc64", "mips", "mipsle", "mips64", "mips64le":
+		return
+	}
+
 	debug.SetPanicOnFault(true)
 	defer func() {
 		if err := recover(); err == nil {
@@ -75,6 +87,7 @@ func f(n int) {
 	}
 
 	f.x = uintptr(unsafe.Pointer(&ill[0]))
-	fn := *(*func())(unsafe.Pointer(&f))
+	p := &f
+	fn := *(*func())(unsafe.Pointer(&p))
 	fn()
 }

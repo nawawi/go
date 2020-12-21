@@ -23,7 +23,6 @@ import (
 	"go/token"
 	"internal/nettrace"
 	"io"
-	"io/ioutil"
 	"log"
 	mrand "math/rand"
 	"net"
@@ -3735,7 +3734,7 @@ func TestTransportDialTLSContext(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		return c, c.HandshakeContext(ctx)
+		return c, c.Handshake()
 	}
 
 	req, err := NewRequest("GET", ts.URL, nil)
@@ -5746,7 +5745,7 @@ func (c *testMockTCPConn) ReadFrom(r io.Reader) (int64, error) {
 func TestTransportRequestWriteRoundTrip(t *testing.T) {
 	nBytes := int64(1 << 10)
 	newFileFunc := func() (r io.Reader, done func(), err error) {
-		f, err := ioutil.TempFile("", "net-http-newfilefunc")
+		f, err := os.CreateTemp("", "net-http-newfilefunc")
 		if err != nil {
 			return nil, nil, err
 		}
